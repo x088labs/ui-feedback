@@ -6,6 +6,7 @@ import path from 'node:path'
 import os from 'node:os'
 import crypto from 'node:crypto'
 import { fileURLToPath } from 'node:url'
+import { createSourceMapResolver } from './sourcemap.mjs'
 
 export const DEFAULT_PORT = 47831
 const HERE = path.dirname(fileURLToPath(import.meta.url))
@@ -63,24 +64,49 @@ export async function symbolicate(metroOrigin, stacks, fetchImpl = fetch) {
   for (const st of (stacks || []).slice(0, 12)) {
     const frames = (st.lines || []).slice(0, 30).map(parse).filter(Boolean)
     if (!frames.length) continue
-    let j
+    let r
     try {
-      const r = await fetchImpl(new URL('/symbolicate', metroOrigin), {
+      r = await fetchImpl(new URL('/symbolicate', metroOrigin), {
         method: 'POST',
         body: JSON.stringify({ stack: frames }),
         signal: AbortSignal.timeout(5000),
       })
-      j = await r.json()
     } catch (e) {
       out.push({ element: st.comp, error: 'symbolicate failed: ' + e.message })
       break
     }
+    // Dev server không phải Metro (Vite, Next...): 404/405 hoặc không trả JSON có stack. Báo để gọi dùng source map.
+    const notMetro = (sticky) => Object.assign(new Error('not metro'), { notMetro: true, sticky })
+    if (r.status === 404 || r.status === 405) throw notMetro(true)
+    let j
+    try { j = await r.json() } catch { throw notMetro(true) }
+    if (!j || !Array.isArray(j.stack)) throw notMetro(false)
     const u = (j.stack || []).find((f) => f.file && !/node_modules/.test(f.file))
     if (!u) continue
     const key = `${u.file}:${u.lineNumber}:${u.column}`
     if (seen.has(key)) continue
     seen.add(key)
     out.push({ element: String(st.comp), createdIn: u.methodName || null, file: norm(u.file), line: u.lineNumber, column: u.column })
+    if (out.length >= 8) break
+  }
+  return out
+}
+
+// React 18 dev (JSX dev transform) ghi sẵn fiber._debugSource = { fileName, lineNumber, columnNumber }: không cần source map.
+// items: [{ comp, file, line, column }] do overlay gửi (debugSources).
+export function fromDebugSources(items) {
+  const out = []
+  const seen = new Set()
+  for (const x of Array.isArray(items) ? items.slice(0, 12) : []) {
+    if (!x || typeof x.file !== 'string' || !x.file || x.file.length > 1000 || !Number.isFinite(+x.line)) continue
+    const file = norm(x.file)
+    if (/node_modules/.test(file)) continue
+    const line = +x.line
+    const column = Number.isFinite(+x.column) ? +x.column : null
+    const key = `${file}:${line}:${column}`
+    if (seen.has(key)) continue
+    seen.add(key)
+    out.push({ element: String(x.comp ?? '').slice(0, 200), createdIn: null, file, line, column })
     if (out.length >= 8) break
   }
   return out
@@ -141,6 +167,24 @@ export const DEFAULT_RECEIVED_MS = 15 * 60000
 
 export function createBridge({ port = DEFAULT_PORT, dir = stateDir(), fetchImpl = fetch, ackMs = process.env.UIFB_ACK_MS != null ? +process.env.UIFB_ACK_MS : DEFAULT_ACK_MS, receivedMs = process.env.UIFB_RECEIVED_MS != null ? +process.env.UIFB_RECEIVED_MS : DEFAULT_RECEIVED_MS, permMinMs = 5000, remindMs = 60000, loopMs = 30 * 60000 } = {}) {
   const token = loadOrCreateToken(dir)
+  const sourceMaps = createSourceMapResolver({ fetchImpl })
+  // origin -> hết hạn (ms): đã biết không phải Metro, khỏi POST /symbolicate (Next sẽ render trang 404 mỗi lần).
+  const notMetro = new Map()
+  // Thứ tự: _debugSource (React 18; dưới Vite chỉnh dòng qua /@fs/) -> Metro /symbolicate (Expo) -> source map của dev server (Vite, Next).
+  async function resolveSource(origin, stacks, debugSources) {
+    const direct = fromDebugSources(debugSources)
+    if (direct.length) return sourceMaps.remapDebugSources(origin, direct)
+    if (!Array.isArray(stacks) || !stacks.length) return []
+    if (!(notMetro.get(origin) > Date.now())) {
+      try {
+        return await symbolicate(origin, stacks, fetchImpl)
+      } catch (e) {
+        if (!e.notMetro) throw e
+        if (e.sticky) notMetro.set(origin, Date.now() + 5 * 60000)
+      }
+    }
+    return sourceMaps.resolve(origin, stacks)
+  }
   const queue = [] // {id,...}
   const items = new Map()
   const waiters = [] // {res, origin, timer}
@@ -539,12 +583,10 @@ export function createBridge({ port = DEFAULT_PORT, dir = stateDir(), fetchImpl 
           try { pageOrigin = new URL(String(b.url)).origin } catch { return json(res, 400, { error: 'invalid url' }) }
         }
         let frames = []
-        if (Array.isArray(b.stacks) && b.stacks.length) {
-          try {
-            frames = await symbolicate(b.metroOrigin || pageOrigin, b.stacks, fetchImpl)
-          } catch (e) {
-            frames = [{ error: e.message }]
-          }
+        try {
+          frames = await resolveSource(b.metroOrigin || pageOrigin, b.stacks, b.debugSources)
+        } catch (e) {
+          frames = [{ error: e.message }]
         }
         const el = b.element || {}
         return json(res, 200, enqueue({

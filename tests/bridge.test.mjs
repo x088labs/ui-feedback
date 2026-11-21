@@ -291,3 +291,42 @@ test('SSE phát message và status', async () => {
     ac.abort()
   } finally { await s.stop() }
 })
+
+test('không phải Metro (Vite/Next): /symbolicate 404 thì tra source map, lần sau khỏi gọi /symbolicate', async () => {
+  const calls = []
+  const map = { version: 3, sources: ['Card.tsx'], names: [], mappings: 'AAAA;AAWM' } // dòng 2 cột 1 -> Card.tsx:12:7
+  const js = 'x\ny\n//# sourceMappingURL=data:application/json;base64,' + Buffer.from(JSON.stringify(map)).toString('base64')
+  const fetchImpl = async (u) => {
+    u = String(u)
+    calls.push(new URL(u).pathname)
+    if (u.endsWith('/symbolicate')) return { ok: false, status: 404, json: async () => { throw new Error('html') } }
+    if (u === 'http://localhost:5173/src/Card.tsx') return { ok: true, status: 200, headers: { get: () => null }, text: async () => js }
+    return { ok: false, status: 404 }
+  }
+  const s = await start({ fetchImpl })
+  try {
+    const body = { note: 'n', url: 'http://localhost:5173/', components: ['Card'], stacks: [{ comp: 'Card', lines: ['at Card (http://localhost:5173/src/Card.tsx:2:1)'] }] }
+    assert.equal((await s.post('/api/feedback', body)).status, 200)
+    assert.equal((await s.post('/api/feedback', body)).status, 200)
+    const got = await (await fetch(s.base + '/api/poll?ack=1&timeout=2000', { headers: s.H })).json()
+    const fr = got.items[0].source.frames[0]
+    assert.deepEqual([fr.file, fr.line, fr.column], ['/src/Card.tsx', 12, 7])
+    assert.deepEqual(calls, ['/symbolicate', '/src/Card.tsx'])
+  } finally { await s.stop() }
+})
+
+test('React 18 _debugSource: không gọi /symbolicate, bỏ node_modules, giữ nguyên dòng khi không chỉnh được qua /@fs/', async () => {
+  const paths = []
+  const s = await start({ fetchImpl: async (u) => { paths.push(new URL(String(u)).pathname); throw new Error('no network') } })
+  try {
+    const body = { note: 'n', url: 'http://localhost:5173/', stacks: STACK, debugSources: [
+      { comp: 'Button', file: 'F:\\app\\node_modules\\@mui\\Button.js', line: 1, column: 1 },
+      { comp: 'Card', file: 'F:\\app\\src\\Card.tsx', line: 42, column: 9 },
+      { comp: 'bad', file: 5, line: 'x' },
+    ] }
+    assert.equal((await s.post('/api/feedback', body)).status, 200)
+    const got = await (await fetch(s.base + '/api/poll?ack=1&timeout=2000', { headers: s.H })).json()
+    assert.deepEqual(got.items[0].source.frames, [{ element: 'Card', createdIn: null, file: 'F:/app/src/Card.tsx', line: 42, column: 9 }])
+    assert.deepEqual(paths, ['/@fs/F:/app/src/Card.tsx'])
+  } finally { await s.stop() }
+})

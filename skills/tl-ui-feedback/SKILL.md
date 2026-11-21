@@ -42,7 +42,7 @@ Tools: `tl_ui_feedback_poll`, `tl_ui_feedback_reply` (with a prefix such as `mcp
 
 ## Notes
 - A free message has no element/source: follow the note.
-- Source files need a React dev server with Metro symbolicate (Expo); production builds have none.
+- Source `file:line` comes from Expo, Vite and Next dev servers (React 18 and 19, Next Server Components included); production builds give no component names or source.
 - Elements from a loop point to the `map` line; use `text`/`testID` to find the item.
 - Do not send note content or page text off the machine.
 - If the page says the running bridge is outdated, run `tl-ui-feedback stop` and ask the user to reload the page (normally the CLI/MCP replaces an older bridge on its own).

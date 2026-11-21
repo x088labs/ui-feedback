@@ -452,14 +452,19 @@
           padding: cs.padding, margin: cs.margin, border: cs.border, display: cs.display,
         },
       },
-      components: [], stacks: [],
+      components: [], stacks: [], debugSources: [],
     }
     var f = fiberOf(el)
     for (var g = f, i = 0; g && i < 14; g = g.return, i++) {
       var n = typeof g.type !== 'string' ? nameOf(g.type) : null
       if (n && out.components.length < 14) out.components.push(n)
       if (i < 10 && g._debugStack && g._debugStack.stack) {
-        out.stacks.push({ comp: n || String(g.tag), lines: String(g._debugStack.stack).split('\n').slice(1, 14) })
+        out.stacks.push({ comp: n || (typeof g.type === 'string' ? g.type : String(g.tag)), lines: String(g._debugStack.stack).split('\n').slice(1, 14) })
+      }
+      // React 18 dev: JSX dev transform ghi sẵn file:dòng, bridge dùng thẳng, không cần source map.
+      var ds = g._debugSource
+      if (i < 10 && ds && typeof ds.fileName === 'string') {
+        out.debugSources.push({ comp: n || (typeof g.type === 'string' ? g.type : String(g.tag)), file: ds.fileName, line: ds.lineNumber, column: ds.columnNumber })
       }
     }
     return out
@@ -690,7 +695,7 @@
     var note = ta.value.trim()
     if (!note) { msg.textContent = L('Hãy gõ ghi chú trước.', 'Type a note first.'); return }
     var body = { note: note, lang: LANG, url: location.href, metroOrigin: location.origin, viewport: { w: window.innerWidth, h: window.innerHeight, dpr: window.devicePixelRatio } }
-    if (picked) { body.element = picked.element; body.components = picked.components; body.stacks = picked.stacks }
+    if (picked) { body.element = picked.element; body.components = picked.components; body.stacks = picked.stacks; body.debugSources = picked.debugSources }
     msg.textContent = L('Đang gửi…', 'Sending…')
     connect().then(function () {
       return api('/api/feedback', { method: 'POST', body: JSON.stringify(body) })

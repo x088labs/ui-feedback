@@ -73,11 +73,12 @@ Installed with `node bridge/cli.mjs install`: run `tl-ui-feedback uninstall` (al
 - Binds to `127.0.0.1` only; rejects unknown `Host` and non-local `Origin`.
 - API calls need a token stored in `~/.ui-feedback/token` (mode 0600), sent as a header. The event stream uses a separate read-only key.
 - Any page on localhost can read the token, so do not run untrusted pages on localhost.
+- Source maps are fetched only from the page's own loopback origin; Server Component maps are read only from `.js.map` files inside a `.next` folder.
 - Chat history stays in memory; nothing is written to disk. State lives in `~/.ui-feedback/` (`UIFB_HOME`), port via `UIFB_PORT`.
 
 ## Limits
 
-- Source `file:line` needs a React dev server with Metro symbolication (Expo). Vite/Next and production builds still send selector, styles and text.
+- Source `file:line` works on Expo (Metro), Vite and Next dev servers (React 18 and 19, including Next Server Components). Production builds send selector, styles and text only.
 - A page through `serve` has the serve port as its origin, so cookies and localStorage are separate from the original port.
 - No screenshots, Firefox or React Native on device yet.
 
