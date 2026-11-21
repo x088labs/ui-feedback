@@ -1,0 +1,11 @@
+{
+  "name": "ui-feedback",
+  "version": "0.1.0",
+  "private": true,
+  "license": "SEE LICENSE IN LICENSE",
+  "description": "Chỉ vào phần UI sai trên browser, agent nhận component + file:dòng nguồn để sửa.",
+  "type": "module",
+  "bin": { "tl-ui-feedback": "bridge/cli.mjs" },
+  "scripts": { "start": "node bridge/server.mjs", "test": "node --test --import ./tests/setup.mjs \"tests/*.test.mjs\"" },
+  "engines": { "node": ">=22" }
+}
