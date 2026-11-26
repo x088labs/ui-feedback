@@ -20,12 +20,13 @@ Arguments are a **site** (dev server port, URL, or HTML folder/file) and an opti
 | `/tl-ui-feedback serve ...` (other forms) | pass through verbatim |
 | `/tl-ui-feedback` (no arguments) | `tl-ui-feedback serve --list`; reuse your own serve, otherwise ask for the site |
 | A prompt saying the page `<origin>` is already open (copied from the page's "Connect agent" button) | nothing: skip steps 1–4, set `ORIGIN = <origin>`, start the loop; on stop, do not stop any serve |
+| `/tl-ui-feedback https://<deployed site>` (not localhost: staging, QA) | do not `serve` it. Run `tl-ui-feedback allow <site>` and show the user its output verbatim (the bookmarklet line in full): save it as a bookmark, open the site, click it, allow local network access if Chrome asks. Then set `ORIGIN = <site origin>` and start the loop. The page sends no source file:line; permission prompts stay in the terminal. After the site was removed or expired, `allow` issues a new key: the user must replace the old bookmark with the new bookmarklet |
 
 Steps:
 1. Run `tl-ui-feedback serve --list`. Reuse a serve only if THIS session started it, then skip step 2. Never touch or stop another session's serve: each agent is bound to one site.
 2. Run the `serve` command **in the background** (`run_in_background`); it runs until stopped. Do not add `--no-open`. With `--cmd`, add `--wait 180` for a slow app (default 60 s).
 3. Read its output until the line with `http://localhost:<p>` (`serving … at …` / `đang phục vụ … tại …`). A line starting with `error:` / `lỗi:` (port busy, command exited, timeout, upstream not loopback): report it and stop; do not try another command or port.
-4. Tell the user one line: the address `http://localhost:<p>` (overlay port) and "click Feedback, click an element, type a note". With two numbers, repeat which port the CLI took as the dev server. (If they ran `tl-ui-feedback install-hooks`, your permission prompts appear as Allow/Deny cards in the page while you stay in the loop, also after a reply, as long as the page is open; risky commands still ask in the terminal.)
+4. Tell the user one line: the address `http://localhost:<p>` (overlay port) and "click Feedback, click an element, type a note" (Ctrl+click, or the "+" toggle on touch devices, adds more elements to the same message; the ruler button in the chat header shows size, padding and margin on the page). With two numbers, repeat which port the CLI took as the dev server. (If they ran `tl-ui-feedback install-hooks`, your permission prompts appear as Allow/Deny cards in the page while you stay in the loop, also after a reply, as long as the page is open; risky commands still ask in the terminal.)
 5. Set `ORIGIN = http://localhost:<p>` and start the loop. Pass `origin: ORIGIN` to every poll and reply. When the user says stop, run `tl-ui-feedback serve --stop <p>` (also stops a `--cmd` dev server).
 
 If `tl-ui-feedback` is not on PATH, use `~/.ui-feedback/bin/tl-ui-feedback` (Windows: `%USERPROFILE%/.ui-feedback/bin/tl-ui-feedback.cmd`).
@@ -42,7 +43,9 @@ Tools: `tl_ui_feedback_poll`, `tl_ui_feedback_reply` (with a prefix such as `mcp
 
 ## Notes
 - A free message has no element/source: follow the note.
+- Several elements in one item: the output shows `elements: N picked` and one `## [A]`, `## [B]`... block each (selector, source; `note:` on the heading when that element has its own note). `[A]` in the main note means that element, e.g. "why does clicking [A] not reload [B]?". Handle every element and answer the whole item in one final reply with its `id`. In JSON (`elements[]`, each `{ ref, note, element, source }`), top-level `element`/`source` exist only when there is at most one element.
 - Source `file:line` comes from Expo, Vite and Next dev servers (React 18 and 19, Next Server Components included); production builds give no component names or source.
 - Elements from a loop point to the `map` line; use `text`/`testID` to find the item.
-- Do not send note content or page text off the machine.
+- Pasted images: the item shows `images: N attached` with `[img1]`, `[img2]`...; `[img1]` in the note means that image. Over MCP the images follow the text as image blocks, each after a `<id> [imgN]:` line; with the CLI each line has a file path (`--json`: `images[].path`, no base64): open it (Read) to see the image; `(could not save the file: …)` means the CLI could not write it. A message can be images only. `dropped from memory` means the bridge no longer has it: ask the user to paste it again if you need it.
+- Do not send note content, page text or pasted images off the machine.
 - If the page says the running bridge is outdated, run `tl-ui-feedback stop` and ask the user to reload the page (normally the CLI/MCP replaces an older bridge on its own).

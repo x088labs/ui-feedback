@@ -12,7 +12,7 @@ const TOOLS = [
   {
     name: 'tl_ui_feedback_poll',
     description:
-      'Wait for UI feedback the user points at in the browser (UI Feedback). Returns the note, element, selector, styles and source file:line to fix. After fixing, call tl_ui_feedback_reply, then call this tool again.',
+      'Wait for UI feedback the user points at in the browser (UI Feedback). Returns the note, element, selector, styles and source file:line to fix. One item can carry several picked elements, listed as [A], [B]... each with its own optional note; [A] in the note refers to that element. Images the user pasted come as image blocks after the text, labelled [img1], [img2]... After fixing, call tl_ui_feedback_reply, then call this tool again.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -54,7 +54,13 @@ async function callTool(name, args = {}, signal) {
     if (r.status === 'unanswered') return formatUnanswered(r, { mcp: true })
     if (!r.count) return 'timeout: ' + nextStep(0, { mcp: true }) // gọn: không lặp header rỗng
     const body = r.items.map(formatItem).join('\n\n')
-    return `status: ${r.status}  count: ${r.count}\n\n${body}\n\nnext_step: ${nextStep(r.count, { mcp: true })}`
+    const text = `status: ${r.status}  count: ${r.count}\n\n${body}\n\nnext_step: ${nextStep(r.count, { mcp: true })}`
+    // Ảnh người dùng dán: khối image của MCP, theo thứ tự tin rồi [imgN], mỗi ảnh có một dòng nhãn đứng trước.
+    const imgs = r.items.flatMap((it) => (it.images || []).filter((g) => g.data).flatMap((g) => [
+      { type: 'text', text: `${it.id} [img${g.n}]:` },
+      { type: 'image', data: g.data, mimeType: g.mime },
+    ]))
+    return imgs.length ? [{ type: 'text', text }, ...imgs] : text
   }
   if (name === 'tl_ui_feedback_reply') {
     await reply(String(args.text || ''), args.id, args.origin)
@@ -89,8 +95,9 @@ rl.on('line', async (line) => {
       const ac = new AbortController()
       inflight.set(id, ac)
       try {
-        const text = await callTool(params.name, params.arguments, ac.signal)
-        if (!ac.signal.aborted) ok(id, { content: [{ type: 'text', text }] }) // spec MCP: không trả lời request đã bị hủy
+        const out = await callTool(params.name, params.arguments, ac.signal)
+        const content = Array.isArray(out) ? out : [{ type: 'text', text: out }]
+        if (!ac.signal.aborted) ok(id, { content }) // spec MCP: không trả lời request đã bị hủy
         return
       } catch (e) {
         if (ac.signal.aborted) return

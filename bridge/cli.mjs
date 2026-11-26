@@ -4,10 +4,12 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
+import { saveImages } from './images.mjs'
 import { ensureServer, poll, reply, status, formatItem, nextStep, formatUnanswered, baseUrl, permissionHook } from './client.mjs'
 import { stateDir, loadOrCreateToken } from './server.mjs'
 import { startServe, stopServe, listServes, runDevCommand, probe } from './serve.mjs'
 import * as inst from './install.mjs'
+import { allowOrigin, removeOrigin, listAllowed, pairKey, bookmarklet } from './remote.mjs'
 import { L } from './i18n.mjs'
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
@@ -68,6 +70,8 @@ const HELP = () => L(`tl-ui-feedback <lệnh>
                             serve <N1> <N2>: hai số thì cổng đang có server là dev server, cổng còn lại là cổng overlay
                             --cmd "<lệnh>" (với URL): tự chạy dev server, chờ sẵn sàng rồi mới mở proxy; --wait <giây> (mặc định 60)
   serve --list | serve --stop <cổng>
+  allow <https://site> [--hours N]   cho site ngoài localhost dùng overlay (mặc định 24 giờ, 0 = không hết hạn); in bookmarklet để mở overlay trên site đó
+  allow --list | allow --remove <https://site>
   install [--path] | install-skill | install-mcp | install-shim [--path]   cài skill, MCP (phạm vi user) và lệnh tl-ui-feedback (--path: tự thêm vào PATH người dùng, Windows)
   install-hooks | uninstall-hooks   thêm/gỡ hook xin quyền (PermissionRequest) vào Claude Code (~/.claude/settings.json) và Codex (~/.codex/hooks.json)
   permission-hook           (do agent gọi) chuyển yêu cầu xin quyền lên trang để bạn bấm Cho phép/Từ chối
@@ -83,6 +87,8 @@ Ngôn ngữ: UIFB_LANG=vi|en`, `tl-ui-feedback <command>
                             serve <N1> <N2>: with two numbers, the port that has a server is the dev server, the other is the overlay port
                             --cmd "<command>" (with a URL): start the dev server, wait until it answers, then proxy; --wait <seconds> (default 60)
   serve --list | serve --stop <port>
+  allow <https://site> [--hours N]   let a site outside localhost use the overlay (default 24 hours, 0 = no expiry); prints a bookmarklet that opens the overlay on it
+  allow --list | allow --remove <https://site>
   install [--path] | install-skill | install-mcp | install-shim [--path]   install the skill, MCP (user scope) and the tl-ui-feedback command (--path: add it to the user PATH, Windows)
   install-hooks | uninstall-hooks   add/remove the PermissionRequest hook for Claude Code (~/.claude/settings.json) and Codex (~/.codex/hooks.json)
   permission-hook           (called by the agent) forwards a permission request to the page for Allow/Deny
@@ -95,11 +101,16 @@ try {
     console.log('bridge:', await ensureServer())
   } else if (cmd === 'poll') {
     const r = await poll({ origin: flag('origin'), timeoutMs: flag('timeout-ms') != null ? +flag('timeout-ms') : undefined, allowAny: rest.includes('--any') })
-    if (rest.includes('--json')) console.log(JSON.stringify(r, null, 2))
+    // Ảnh: ghi ra thư mục tạm cho cả hai dạng output; `--json` bỏ base64 (agent mở theo `path`).
+    if (rest.includes('--json')) console.log(JSON.stringify({ ...r, items: (r.items || []).map((it) => saveImages(it, undefined, { strip: true })) }, null, 2))
     else if (r.status === 'unanswered') console.log(formatUnanswered(r))
     else {
       console.log(`status: ${r.status}  count: ${r.count}`)
-      for (const it of r.items) console.log('\n' + formatItem(it))
+      for (const it of r.items) {
+        saveImages(it)
+        for (const g of it.images || []) if (g.error) console.error(L(`không ghi được ảnh [img${g.n}] của ${it.id}: ${g.error}`, `could not save image [img${g.n}] of ${it.id}: ${g.error}`))
+        console.log('\n' + formatItem(it))
+      }
       console.log('\nnext_step: ' + nextStep(r.count))
     }
   } else if (cmd === 'reply') {
@@ -203,6 +214,27 @@ try {
         s.close().then(() => process.exit(1))
       })
       await new Promise(() => {}) // giữ tiến trình sống tới khi nhận tín hiệu
+    }
+  } else if (cmd === 'allow') {
+    const dir = stateDir()
+    if (rest[0] === '--list') {
+      const l = listAllowed(dir)
+      console.log(l.length ? l.map((x) => `${x.origin}  ${x.until ? L('hết hạn ', 'expires ') + new Date(x.until).toLocaleString() : L('không hết hạn', 'no expiry')}`).join('\n') : L('chưa cho phép site nào ngoài localhost', 'no site outside localhost is allowed'))
+    } else if (rest[0] === '--remove') {
+      if (!rest[1]) throw new Error(L('thiếu site: allow --remove <https://site>', 'missing site: allow --remove <https://site>'))
+      console.log(removeOrigin(dir, rest[1]) ? L(`đã gỡ ${rest[1]}`, `removed ${rest[1]}`) : L(`${rest[1]} không có trong danh sách`, `${rest[1]} is not in the list`))
+    } else {
+      if (!positional[0]) throw new Error(L('dùng: allow <https://site> [--hours N]', 'usage: allow <https://site> [--hours N]'))
+      const hours = rest.includes('--hours') ? +(flag('hours') ?? NaN) : 24 // có --hours mà thiếu số thì báo lỗi, không lặng lẽ dùng 24
+      if (!(hours >= 0)) throw new Error(L('--hours phải là số giờ ≥ 0', '--hours must be a number of hours ≥ 0'))
+      const e = allowOrigin(dir, positional[0], hours)
+      const bridge = await ensureServer()
+      console.log(L(`đã cho phép ${e.origin} ${e.until ? 'tới ' + new Date(e.until).toLocaleString() : '(không hết hạn)'}.`, `allowed ${e.origin} ${e.until ? 'until ' + new Date(e.until).toLocaleString() : '(no expiry)'}.`))
+      console.log(L('Tạo một bookmark với URL dưới đây, mở site rồi bấm bookmark đó để hiện overlay (bấm lại sau mỗi lần tải lại trang):',
+        'Create a bookmark with the URL below, open the site and click it to show the overlay (click again after each page reload):'))
+      console.log('\n' + bookmarklet(bridge, pairKey(loadOrCreateToken(dir), e.origin, e.nonce)) + '\n')
+      console.log(L(`Trang đó chỉ gửi được feedback và xem hội thoại của chính nó; thẻ xin quyền không hiện ở đó. Agent nghe bằng: tl-ui-feedback poll --origin ${e.origin}. Đừng chia sẻ bookmarklet. Gỡ: tl-ui-feedback allow --remove ${e.origin}`,
+        `That page can only send feedback and see its own conversation; permission cards are not shown there. The agent listens with: tl-ui-feedback poll --origin ${e.origin}. Do not share the bookmarklet. Remove: tl-ui-feedback allow --remove ${e.origin}`))
     }
   } else if (cmd === 'url') {
     console.log(baseUrl())

@@ -8,7 +8,7 @@ import path from 'node:path'
 import { spawn } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { createBridge } from '../bridge/server.mjs'
-import { startServe, listServes, stopServe, resolveStatic } from '../bridge/serve.mjs'
+import { startServe, listServes, stopServe, resolveStatic, resolveLocalCommand } from '../bridge/serve.mjs'
 
 const CLI = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../bridge/cli.mjs')
 const B = 'http://127.0.0.1:47831'
@@ -303,4 +303,29 @@ test('CLI: UIFB_LANG=en in thông báo tiếng Anh', async () => {
   })
   assert.equal(r.code, 1)
   assert.match(r.out, /^error: missing site after port 3000/)
+})
+
+test('resolveLocalCommand: Windows thêm .\\ cho file chạy được nằm trong cwd (NoDefaultCurrentDirectoryInExePath)', () => {
+  const R = String.raw
+  const cwd = R`C:\proj`
+  const files = new Set([R`C:\proj\start-web.cmd`, R`C:\proj\run.bat`, R`C:\proj\my tool.exe`, R`C:\proj\both.cmd`, R`C:\proj\both.exe`, R`C:\proj\start.cmd`, R`C:\proj\echo.bat`,
+    R`C:\proj\npm.cmd`, R`C:\nodejs\npm.cmd`, R`C:\proj\python.exe`, R`C:\py\python.exe`])
+  const isFile = (f) => files.has(path.win32.normalize(f))
+  const env = { PATH: 'C:\\nodejs;;C:\\py\\' } // có mục rỗng và dấu \ cuối
+  const r = (c, p = 'win32') => resolveLocalCommand(c, cwd, p, isFile, env)
+  assert.equal(r('start-web.cmd app -Mode dev'), R`.\start-web.cmd app -Mode dev`)
+  assert.equal(r('  run arg'), R`  .\run.bat arg`) // không đuôi: thử .cmd/.bat/.exe/.com
+  assert.equal(r('"my tool.exe" --x'), R`".\my tool.exe" --x`)
+  assert.equal(r('npm run dev'), 'npm run dev') // không có trong cwd: để PATH lo
+  assert.equal(r(R`.\start-web.cmd app`), R`.\start-web.cmd app`) // đã có đường dẫn
+  assert.equal(r(R`C:\x\start-web.cmd`), R`C:\x\start-web.cmd`)
+  assert.equal(r('start-web.cmd app', 'linux'), 'start-web.cmd app')
+  assert.equal(r('both x'), R`.\both.exe x`) // thứ tự PATHEXT: .exe trước .cmd
+  assert.equal(r('start npm run dev'), 'start npm run dev') // lệnh có sẵn của cmd thắng start.cmd
+  assert.equal(r('ECHO hi'), 'ECHO hi')
+  // Có trên PATH: không để file trong cwd chiếm chỗ lệnh thật
+  assert.equal(r('npm run dev'), 'npm run dev')
+  assert.equal(r('python -m http.server'), 'python -m http.server')
+  assert.equal(resolveLocalCommand('npm run dev', cwd, 'win32', isFile, { Path: R`C:\nodejs` }), 'npm run dev')
+  assert.equal(resolveLocalCommand('npm run dev', cwd, 'win32', isFile, {}), R`.\npm.cmd run dev`)
 })

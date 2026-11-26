@@ -1,11 +1,16 @@
 /* UI Feedback Bridge — overlay chạy trong trang (MAIN world).
  * Do `tl-ui-feedback serve` chèn vào trang, hoặc dòng dev-only (<script src=".../overlay.js">); bridge phục vụ file này ở /overlay.js.
  * Nút nổi "Feedback" mở khung chat: lịch sử yêu cầu của bạn + phản hồi của agent + trạng thái.
- * Chọn phần tử: nút "Chọn phần tử" hoặc Alt+Shift+K → rê (khung xanh) → click (chọn lại bao nhiêu lần tùy ý, chế độ chọn giữ bật) → gõ ghi chú → Gửi. Esc, nút hoặc Alt+Shift+K để tắt chế độ chọn.
- * Cũng có thể gửi tin nhắn tự do không kèm phần tử.
+ * Chọn phần tử: nút "Chọn phần tử" hoặc Alt+Shift+K → rê (khung xanh) → click (click tiếp thì thay phần tử). Ctrl+click (Cmd+click) THÊM phần tử
+ * (nhãn A, B, C…, tối đa 10, có huy hiệu trên trang), mỗi phần tử có ghi chú riêng; tin nhắn chung có thể nhắc phần tử bằng [A], [B] (bấm nhãn để chèn). Gửi một lần = một tin cho agent.
+ * Esc, nút hoặc Alt+Shift+K để tắt chế độ chọn. Cũng có thể gửi tin nhắn tự do không kèm phần tử.
  */
 ;(function () {
   'use strict'
+  // Khóa ghép cặp (bookmarklet của `tl-ui-feedback allow`, cho site ngoài localhost): giữ trong closure, xóa khỏi window
+  // TRƯỚC mọi lần thoát sớm, để bấm bookmarklet lần nữa (overlay đã nạp) không để khóa nằm lại trên trang.
+  var PAIR = (window.__UIFB__ && window.__UIFB__.key) || ''
+  if (window.__UIFB__ && 'key' in window.__UIFB__) try { delete window.__UIFB__.key } catch (_) {}
   if (window.__UIFB_LOADED__) return
   window.__UIFB_LOADED__ = true
   if (window.top !== window) return // chỉ khung chính
@@ -15,8 +20,19 @@
   var es = null
   var listening = false
   var picking = false
+  var multiOn = false // nút "+": mỗi lần chạm/click là thêm phần tử (thiết bị cảm ứng không có Ctrl)
   var current = null // phần tử đang rê
-  var picked = null // dữ liệu phần tử đã chọn, chờ gửi cùng ghi chú
+  var picks = [] // phần tử đã chọn, chờ gửi: [{ ref: 'A', el, data: extract(el), note, mk: { o, b } }]
+  var REFS = 'ABCDEFGHIJ' // nhãn theo thứ tự chọn; xoá một phần tử thì nhãn khác giữ nguyên để [B] trong câu không trỏ sai
+  var nextRef = 0
+  var warnedNote = null // tin nhắn đã được cảnh báo token [X] lạ: bấm Gửi lần nữa thì vẫn gửi
+  // Ảnh dán/thả/chọn file, chờ gửi: [{ data(base64), mime, w, h, url(objectURL xem trước) }]. Giới hạn khớp bridge/images.mjs.
+  var atts = []
+  var MAX_ATT = 4, MAX_ATT_BYTES = 1536 * 1024, MAX_ATT_SIDE = 1600
+  var thumbs = {} // 'itemId:n' -> objectURL | null (đang tải) | 'gone': thumbnail của tin đã gửi, lấy từ /api/image
+  var thumbTries = {} // 'itemId:n' -> số lần tải lỗi tạm thời (mạng, bridge khởi động lại): thử lại tối đa 3 lần
+  var attPending = 0 // ảnh đang thu nhỏ/đọc base64: chưa vào atts, Gửi phải đợi
+  var bridgeImages = false // bridge báo hỗ trợ ảnh trong handshake (bridge cũ còn chạy nền thì không)
   var open = false
   var pinned = false // ghim: khung dính mép phải trang, trang co lại nhường chỗ
   var pinW = 380 // chiều rộng đang hiển thị (đã kẹp theo cửa sổ)
@@ -61,12 +77,17 @@
     '.hd{display:flex;align-items:center;gap:8px;padding:9px 10px;border-bottom:1px solid #e3e6ee;background:#f6f7fa;white-space:nowrap}' +
     '.hd .lr{flex:none;display:flex;align-items:center;border:1px solid #c9ced8;background:#fff;color:#1d2433;border-radius:6px;padding:4px 6px;cursor:pointer;line-height:0}.hd .lr[hidden]{display:none}.hd .lr input{position:absolute;opacity:0;width:0;height:0;margin:0}.hd .lr svg{display:block;pointer-events:none}.hd .lr.on{background:#f9f6e7;border-color:#ecd58a}' +
     '.hd .t{font-weight:600;flex:none}.hd .pres{font-size:11px;color:#5d6678;margin-right:auto;display:flex;align-items:center;gap:5px;min-width:0}.hd .ptxt{overflow:hidden;text-overflow:ellipsis;min-width:0}.hd .ptxt[hidden]{display:none}.hd button{flex:none}' +
-    '.stale{margin:4px 0 8px;padding:8px 10px;border:1px solid #ecd58a;background:#fdf9ea;border-radius:8px;font-size:12px;color:#5d4a00;display:flex;flex-direction:column;gap:6px;align-items:flex-start}' +
+    '.stale{position:relative;margin:4px 0 8px;padding:8px 26px 8px 10px;border:1px solid #ecd58a;background:#fdf9ea;border-radius:8px;font-size:12px;color:#5d4a00;display:flex;flex-direction:column;gap:6px;align-items:flex-start}' +
+    '.stale button.x{position:absolute;top:4px;right:4px;border:0;background:none;color:#8a7420;font-size:15px;line-height:1;padding:2px 5px;border-radius:4px;cursor:pointer}.stale button.x:hover{background:#f3e8bd;color:#5d4a00}' +
     '.hd button.cp{font-size:11px;padding:1px 7px;border-color:#22a06b;color:#1a7f52}.hd button.cp:hover{background:#e7f6ef}.hd button.cp[hidden]{display:none}' +
     'button.b{border:1px solid #c9ced8;background:#fff;color:#1d2433;border-radius:6px;padding:3px 9px;cursor:pointer}' +
     'button.b:hover{background:#eef1f7}button.b.p{background:#f9f6e7;border-color:#ecd58a;color:#1d2433}button.b.p:disabled{opacity:.5;cursor:default}' +
-    'button.b svg{display:block;pointer-events:none}.hd button.b[data-a=pin],.hd button.b[data-a=clear]{padding:4px 6px;line-height:0}' +
+    'button.b svg{display:block;pointer-events:none}.hd button.b[data-a=pin],.hd button.b[data-a=clear],.hd button.b[data-a=measure]{padding:4px 6px;line-height:0}' +
     'button.b.on{background:#f9f6e7;color:#1d2433;border-color:#ecd58a}' +
+    // Nút có icon và chữ (.ib): mọi màn hình chỉ hiện icon cho đồng nhất; chữ nằm trong aria-label/title (trình đọc màn hình, tooltip).
+    'button.b.ib .bt{display:none}button.b.ib{padding:5px 9px;line-height:0}.row button.b{min-height:30px}' +
+    // Vừa chép xong (.done): đổi icon thành dấu tích trên nền xanh trong 2 giây, vì chữ "Đã chép ✓" bị ẩn.
+    'button.b .ok{display:none}button.b.done .ok{display:block}button.b.done .ic{display:none}.hd button.b.done,.hd button.b.done:hover{background:#22a06b;border-color:#22a06b;color:#fff}' +
     '.list{flex:1;overflow-y:auto;padding:10px;display:flex;flex-direction:column;gap:9px;background:#fff}' +
     '.list{scrollbar-width:thin;scrollbar-color:transparent transparent}.list:hover{scrollbar-color:#c9ced8 transparent}' +
     '.list::-webkit-scrollbar{width:6px}.list::-webkit-scrollbar-thumb{background:transparent;border-radius:3px}.list:hover::-webkit-scrollbar-thumb{background:#c9ced8}' +
@@ -77,30 +98,57 @@
     '.empty{margin:auto;text-align:center;color:#8a93a6;padding:0 14px}' +
     '.g{display:flex;flex-direction:column;max-width:88%}.g.u{align-self:flex-end;align-items:flex-end}.g.a{align-self:flex-start;align-items:flex-start}' +
     '.m{max-width:100%;padding:7px 10px;border-radius:10px;overflow-wrap:anywhere;white-space:pre-wrap}' +
-    '.m.u{background:#f9f6e7;color:#1d2433;border:1px solid #ecd58a;border-bottom-right-radius:3px}' +
+    '.m.u{background:#f9f6e7;color:#1d2433;border-bottom-right-radius:3px}' +
     '.m.a{background:#eef1f7;border-bottom-left-radius:3px}' +
     '.meta{font-size:11px;margin-top:3px;color:#5d6678;white-space:normal}.g.u .meta{text-align:right}' +
     '.chip{display:block;max-width:100%;margin-top:4px;padding:0 6px;border-radius:4px;background:#00000014;font:11px ui-monospace,Consolas,monospace;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}' +
     '.st.replied{color:#1e7a4a}' +
     '.rs{margin-left:8px;padding:0;border:0;background:none;color:#8a5a00;font:inherit;cursor:pointer}.rs:hover{text-decoration:underline}.rs:disabled{opacity:.5;cursor:default}' +
     '.cmp{border-top:1px solid #e3e6ee;padding:8px;background:#f6f7fa}' +
-    '.sel{display:none;align-items:center;gap:6px;margin-bottom:6px;font-size:12px;color:#1d2433}.sel.show{display:flex}' +
-    '.sel .lbl{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;background:#f9f6e7;border-radius:5px;padding:2px 7px}' +
+    '.sel{display:none;flex-direction:column;gap:4px;margin-bottom:6px;max-height:150px;overflow-y:auto;font-size:12px;color:#1d2433}.sel.show{display:flex}' +
+    '.sel{scrollbar-width:thin;scrollbar-color:transparent transparent}.sel:hover{scrollbar-color:#c9ced8 transparent}' +
+    '.sel::-webkit-scrollbar{width:6px}.sel::-webkit-scrollbar-thumb{background:transparent;border-radius:3px}.sel:hover::-webkit-scrollbar-thumb{background:#c9ced8}' +
+    '.pk{display:flex;align-items:center;gap:5px}.pk button.b{padding:1px 7px}' +
+    '.pk .ref{flex:none;min-width:22px;height:20px;padding:0 5px;border:0;border-radius:5px;background:#e0b100;color:#1d2433;font-weight:700;font-size:11px;cursor:pointer}.pk .ref:hover{background:#c99f00}' +
+    '.sel .lbl{flex:0 1 42%;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;background:#f9f6e7;border-radius:5px;padding:2px 7px}' +
+    '.pk input{flex:1;min-width:0;border:1px solid #c9ced8;border-radius:5px;padding:2px 6px;color:#1d2433;background:#fff;font-size:12px}' +
+    '.box.bm{background:none}' +
+    '.bmm,.bmp,.bmi{position:fixed;display:none;pointer-events:none}.bmm{border-style:solid;border-color:#f6a24f8c}.bmp{border-style:solid;border-color:#7cc47c8c;background:#6fa8dc59;background-clip:content-box}' +
+    '.bmi{background:#1d2433;color:#fff;padding:3px 7px;border-radius:4px;font:11px/1.4 ui-monospace,Consolas,monospace;white-space:pre;box-shadow:0 1px 4px #0005}.bmi b{font-weight:700;color:#ffd666}' +
+    '.mko{position:fixed;display:none;border:2px dashed #e0b100;border-radius:3px;pointer-events:none}' +
+    '.mkb{position:fixed;display:none;min-width:18px;height:18px;padding:0 4px;border:0;border-radius:9px;background:#e0b100;color:#1d2433;font:700 11px/18px system-ui,sans-serif;text-align:center;cursor:pointer;pointer-events:auto;box-shadow:0 1px 3px #0006}' +
+    '.en{margin-top:4px;font-size:12px;white-space:pre-wrap}' +
+    '.att{display:none;gap:6px;flex-wrap:wrap;margin-bottom:6px}.att.show{display:flex}' +
+    '.th{position:relative;width:52px;height:52px;border:1px solid #c9ced8;border-radius:6px;overflow:hidden;background:#fff}.th img{width:100%;height:100%;object-fit:cover;display:block}' +
+    '.th button{position:absolute;top:2px;right:2px;width:16px;height:16px;padding:0;border:0;border-radius:8px;background:#1d2433cc;color:#fff;font:12px/16px system-ui,sans-serif;cursor:pointer}' +
+    '.th button.tk{top:auto;right:auto;left:0;bottom:0;width:auto;height:14px;padding:0 4px;border-radius:0 4px 0 0;font-size:10px;line-height:14px}' +
+    '.ims{display:flex;gap:4px;flex-wrap:wrap;margin-top:4px}.ims a,.ims span{display:block;width:64px;height:48px;border-radius:5px;overflow:hidden;background:#00000014}.ims img{width:100%;height:100%;object-fit:cover;display:block}' +
+    '.ims span{font-size:10px;line-height:1.2;padding:3px;color:#5b6475;box-sizing:border-box}' +
+    '.cmp.drop{outline:2px dashed #e0b100;outline-offset:-4px}' +
     'textarea{width:100%;height:58px;resize:none;border:1px solid #c9ced8;border-radius:6px;padding:6px;color:#1d2433;background:#fff}' +
-    '.row{display:flex;gap:6px;justify-content:flex-end;margin-top:6px;align-items:center}.row .msg{flex:1;font-size:11px;color:#b3261e;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.row button{flex:none;white-space:nowrap}' +
+    '.row{display:flex;gap:6px;justify-content:flex-end;margin-top:6px;align-items:center}.row .msg{flex:1;font-size:11px;line-height:1.3;color:#b3261e;min-width:0;overflow:hidden;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow-wrap:anywhere}.row button{flex:none;white-space:nowrap}' +
     '</style>' +
-    '<div class="box"></div><div class="tag"></div>' +
-    '<div class="chat"><div class="rz" title="' + L('Kéo để đổi kích thước', 'Drag to resize') + '"></div><div class="rzw" title="' + L('Kéo để đổi chiều rộng', 'Drag to change the width') + '"></div><div class="hd"><span class="t">UI Feedback</span><span class="pres"><span class="dot"></span><span class="ptxt">' + L('Chưa kết nối', 'Not connected') + '</span><button class="b cp" data-a="connect" hidden title="' + L('Chưa có agent. Bấm để chép một câu lệnh, dán vào agent bất kỳ (Claude Code, Codex…) để agent kết nối và nhận phản hồi từ trang này', 'No agent yet. Click to copy a prompt; paste it into any agent (Claude Code, Codex…) to connect it to this page') + '">' + L('Kết nối agent', 'Connect agent') + '</button></span>' +
-    '<label class="lr" hidden title="' + L('Tự tải lại trang khi file của site thay đổi', 'Reload the page when site files change') + '" aria-label="' + L('Tự tải lại', 'Auto-reload') + '"><input type="checkbox" data-live><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a9 9 0 1 1-3-6.7L21 8"/><path d="M21 3v5h-5"/></svg></label><button class="b" data-a="pin" title="' + L('Ghim cố định bên phải trang (kéo mép trái để đổi chiều rộng)', 'Pin to the right edge (drag the left edge to resize)') + '" aria-label="' + L('Ghim', 'Pin') + '"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 17v5"/><path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z"/></svg></button><button class="b" data-a="clear" title="' + L('Xóa lịch sử hội thoại', 'Clear conversation history') + '" aria-label="' + L('Xóa lịch sử hội thoại', 'Clear conversation history') + '"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><path d="M10 11v6"/><path d="M14 11v6"/></svg></button><button class="b" data-a="close" title="' + L('Đóng', 'Close') + '">×</button></div>' +
+    '<div class="mks"></div><div class="hbm"></div><div class="box"></div><div class="tag"></div>' +
+    '<div class="chat"><div class="rz" title="' + L('Kéo để đổi kích thước', 'Drag to resize') + '"></div><div class="rzw" title="' + L('Kéo để đổi chiều rộng', 'Drag to change the width') + '"></div><div class="hd"><span class="t">UI Feedback</span><span class="pres"><span class="dot"></span><span class="ptxt">' + L('Chưa kết nối', 'Not connected') + '</span><button class="b cp ib" data-a="connect" hidden title="' + L('Chưa có agent. Bấm để chép một câu lệnh, dán vào agent bất kỳ (Claude Code, Codex…) để agent kết nối và nhận phản hồi từ trang này', 'No agent yet. Click to copy a prompt; paste it into any agent (Claude Code, Codex…) to connect it to this page') + '" aria-label="' + L('Kết nối agent', 'Connect agent') + '"><svg class="ic" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 22v-5"/><path d="M9 8V2"/><path d="M15 8V2"/><path d="M18 8v5a4 4 0 0 1-4 4h-4a4 4 0 0 1-4-4V8Z"/></svg><svg class="ok" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg><span class="bt">' + L('Kết nối agent', 'Connect agent') + '</span></button></span>' +
+    '<label class="lr" hidden title="' + L('Tự tải lại trang khi file của site thay đổi', 'Reload the page when site files change') + '" aria-label="' + L('Tự tải lại', 'Auto-reload') + '"><input type="checkbox" data-live><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a9 9 0 1 1-3-6.7L21 8"/><path d="M21 3v5h-5"/></svg></label><button class="b" data-a="measure" title="' + L('Hiện kích thước, padding, margin của phần tử đang trỏ và đã chọn', 'Show size, padding and margin of the hovered and picked elements') + '" aria-label="' + L('Đo phần tử', 'Measure elements') + '"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21.3 15.3a2.4 2.4 0 0 1 0 3.4l-2.6 2.6a2.4 2.4 0 0 1-3.4 0L2.7 8.7a2.41 2.41 0 0 1 0-3.4l2.6-2.6a2.41 2.41 0 0 1 3.4 0Z"/><path d="m14.5 12.5 2-2"/><path d="m11.5 9.5 2-2"/><path d="m8.5 6.5 2-2"/><path d="m17.5 15.5 2-2"/></svg></button><button class="b" data-a="pin" title="' + L('Ghim cố định bên phải trang (kéo mép trái để đổi chiều rộng)', 'Pin to the right edge (drag the left edge to resize)') + '" aria-label="' + L('Ghim', 'Pin') + '"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 17v5"/><path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z"/></svg></button><button class="b" data-a="clear" title="' + L('Xóa lịch sử hội thoại', 'Clear conversation history') + '" aria-label="' + L('Xóa lịch sử hội thoại', 'Clear conversation history') + '"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><path d="M10 11v6"/><path d="M14 11v6"/></svg></button><button class="b" data-a="close" title="' + L('Đóng', 'Close') + '">×</button></div>' +
     '<div class="list"></div>' +
-    '<div class="cmp"><div class="sel"><span class="lbl"></span><button class="b" data-a="unpick" title="' + L('Bỏ phần tử đã chọn', 'Clear the picked element') + '">×</button></div>' +
-    '<textarea placeholder="' + L('Ghi chú: sai ở đâu? (Ctrl+Enter để gửi)', 'Note: what is wrong? (Ctrl+Enter to send)') + '"></textarea>' +
-    '<div class="row"><button class="b" data-a="pick" title="' + L('Chọn phần tử trên trang (Alt+Shift+K)', 'Pick an element on the page (Alt+Shift+K)') + '">' + L('Chọn phần tử', 'Pick element') + '</button><span class="msg"></span><button class="b p" data-a="send">' + L('Gửi cho agent', 'Send to agent') + '</button></div></div></div>' +
+    '<div class="cmp"><div class="sel"></div><div class="att"></div><input type="file" accept="image/*" multiple hidden data-file>' +
+    '<textarea placeholder="' + L('Ghi chú: sai ở đâu? Dán ảnh bằng Ctrl+V (Ctrl+Enter để gửi)', 'Note: what is wrong? Paste images with Ctrl+V (Ctrl+Enter to send)') + '"></textarea>' +
+    '<div class="row"><button class="b ib" data-a="pick" aria-label="' + L('Chọn phần tử', 'Pick element') + '" title="' + L('Chọn phần tử trên trang (Alt+Shift+K). Ctrl+click để chọn thêm nhiều phần tử', 'Pick an element on the page (Alt+Shift+K). Ctrl+click to add more elements') + '"><svg class="ic" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 4.1 12 6"/><path d="m5.1 8-2.9-.8"/><path d="m6 12-1.9 2"/><path d="M7.2 2.2 8 5.1"/><path d="M9.04 9.69a.5.5 0 0 1 .65-.65l11 4.5a.5.5 0 0 1-.07.95l-4.35 1.04a1 1 0 0 0-.74.74l-1.04 4.35a.5.5 0 0 1-.95.07z"/></svg><span class="bt">' + L('Chọn phần tử', 'Pick element') + '</span></button><button class="b" data-a="multi" aria-pressed="false" title="' + L('Bật để mỗi lần chạm/click là THÊM một phần tử (thay cho Ctrl+click, dùng trên điện thoại)', 'Turn on so each tap/click ADDS an element (replaces Ctrl+click, for mobile)') + '">+</button><button class="b" data-a="attach" title="' + L('Đính kèm ảnh (hoặc dán Ctrl+V, kéo thả ảnh vào khung)', 'Attach images (or paste with Ctrl+V, drop images on the panel)') + '" aria-label="' + L('Đính kèm ảnh', 'Attach images') + '"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-3.1-3.1a2 2 0 0 0-2.8 0L6 21"/></svg></button><span class="msg"></span><button class="b p ib" data-a="send" aria-label="' + L('Gửi cho agent', 'Send to agent') + '" title="' + L('Gửi cho agent (Ctrl+Enter)', 'Send to agent (Ctrl+Enter)') + '"><svg class="ic" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14.54 21.69a.5.5 0 0 0 .94-.03l6.5-19a.5.5 0 0 0-.64-.63l-19 6.5a.5.5 0 0 0-.02.93l7.93 3.18a2 2 0 0 1 1.11 1.11z"/><path d="m21.85 2.15-10.94 10.94"/></svg><span class="bt">' + L('Gửi cho agent', 'Send to agent') + '</span></button></div></div></div>' +
     '<button class="fab" title="' + L('Mở khung chat phản hồi UI (Alt+Shift+H: ẩn/hiện)', 'Open the UI feedback chat (Alt+Shift+H: hide/show)') + '"><span class="dot"></span><span>Feedback</span><span class="badge"></span></button>'
   var $ = function (s) { return root.querySelector(s) }
+  // Đọc/đổi chữ của nút. Nút có icon (.ib) giữ icon, chỉ đổi phần chữ và aria-label (chữ luôn ẩn, trình đọc màn hình vẫn đọc được).
+  function btnText(btn, t) {
+    var sp = btn.querySelector('.bt')
+    if (t == null) return sp ? sp.textContent : btn.textContent
+    if (sp) { sp.textContent = t; btn.setAttribute('aria-label', t) } else btn.textContent = t
+  }
   var box = $('.box'), tag = $('.tag'), chat = $('.chat'), list = $('.list'), ta = $('textarea'), msg = $('.msg')
   var fab = $('.fab'), fabDot = $('.fab .dot'), badge = $('.badge'), pres = $('.pres .dot'), ptxt = $('.ptxt')
-  var selBox = $('.sel'), selLbl = $('.sel .lbl'), pickBtn = $('[data-a="pick"]'), cpBtn = $('[data-a="connect"]')
+  var attBox = $('.att'), fileIn = $('[data-file]')
+  // Thiết bị cảm ứng không có Ctrl+V/Ctrl+Enter: gợi ý ngắn, dán ảnh qua nút ảnh hoặc menu dán của bàn phím.
+  try { if (window.matchMedia('(hover:none) and (pointer:coarse)').matches) ta.placeholder = L('Ghi chú: sai ở đâu?', 'Note: what is wrong?') } catch (_) {}
+  var selBox = $('.sel'), mks = $('.mks'), cmp = $('.cmp'), pickBtn = $('[data-a="pick"]'), cpBtn = $('[data-a="connect"]')
   function mount() { (document.body || document.documentElement).appendChild(host) }
   if (document.body) mount()
   else document.addEventListener('DOMContentLoaded', mount)
@@ -124,12 +172,13 @@
   function connect() {
     if (token) return Promise.resolve(token)
     if (connecting) return connecting
-    connecting = fetch(BRIDGE + '/api/handshake').then(function (r) {
-      if (!r.ok) throw new Error('handshake ' + r.status)
+    connecting = fetch(BRIDGE + '/api/handshake' + (PAIR ? '?key=' + encodeURIComponent(PAIR) : '')).then(function (r) {
+      if (!r.ok) { var e = new Error('handshake ' + r.status); e.status = r.status; throw e }
       return r.json()
     }).then(function (j) {
       token = j.token
       sseKey = j.sse || null
+      bridgeImages = j.images === true
       // Bridge bản cũ (còn chạy nền từ trước khi nâng cấp) không có khóa SSE: báo rõ thay vì im lặng mất cập nhật trực tiếp.
       if (!sseKey) msg.textContent = L('Bridge đang chạy là bản cũ: chạy `tl-ui-feedback stop` rồi tải lại trang.', 'The running bridge is outdated: run `tl-ui-feedback stop`, then reload the page.')
       setPresence(j.listening)
@@ -153,6 +202,7 @@
   function isWorking() { return entries.some(function (e) { return e.role === 'user' && e.status === 'received' }) }
   // "Working" quá lâu: tin received cũ nhất mà từ lúc gửi (hoặc từ tin agent gần nhất) đã quá STALE_MS không có gì mới.
   var STALE_MS = (window.__UIFB__ && +window.__UIFB__.staleMs) || 3 * 60000 // staleMs: chỉ dùng cho test
+  var staleDismissed = null // id tin mà người dùng đã đóng cảnh báo; tin khác quá hạn thì cảnh báo hiện lại
   function staleItem() {
     var w = null, last = 0
     entries.forEach(function (e) {
@@ -208,9 +258,11 @@
     })
   }
   function copyPrompt(btn, text, okMsg) {
-    var label = btn.textContent
+    // Bấm lại khi đang hiện "Đã chép": giữ chữ gốc đã lưu, không lưu nhầm chữ "Đã chép".
+    var label = btn._label || (btn._label = btnText(btn))
+    clearTimeout(btn._done)
     copyText(text).then(function () {
-      btn.textContent = L('Đã chép ✓', 'Copied ✓')
+      btnText(btn, L('Đã chép ✓', 'Copied ✓')); btn.classList.add('done')
       msg.textContent = okMsg
     }, function () {
       // Trình duyệt chặn clipboard: đưa câu lệnh vào ô ghi chú để người dùng tự chép, nhưng chỉ khi ô đang trống
@@ -223,7 +275,7 @@
         msg.textContent = ''
       }
     })
-    setTimeout(function () { btn.textContent = label }, 2000)
+    btn._done = setTimeout(function () { btnText(btn, label); btn.classList.remove('done'); btn._label = null }, 2000)
   }
   function copyConnect() { copyPrompt(cpBtn, connectPrompt(), L('Đã chép câu lệnh: dán vào agent để kết nối.', 'Prompt copied: paste it into an agent to connect.')) }
   function setPresence(on) {
@@ -296,16 +348,28 @@
       g.className = 'g ' + side
       var m = document.createElement('div')
       m.className = 'm ' + side
-      var t = document.createElement('div')
-      t.textContent = e.text
-      m.appendChild(t)
-      if (e.element) {
+      if (e.text) {
+        var t = document.createElement('div')
+        t.textContent = e.text
+        m.appendChild(t)
+      }
+      // Bridge mới gửi elements[] (nhãn + ghi chú riêng); bridge cũ chỉ có element.
+      var els = e.elements && e.elements.length ? e.elements : e.element ? [e.element] : []
+      els.forEach(function (x) {
+        var tagged = els.length > 1 || x.note
         var c = document.createElement('span')
         c.className = 'chip'
-        c.textContent = e.element.label + (e.element.file ? ' · ' + e.element.file.split('/').slice(-2).join('/') : '')
-        c.title = e.element.file || ''
+        c.textContent = (tagged && x.ref ? '[' + x.ref + '] ' : '') + (x.label || '') + (x.file ? ' · ' + x.file.split('/').slice(-2).join('/') : '')
+        c.title = x.file || ''
         m.appendChild(c)
-      }
+        if (x.note) {
+          var en = document.createElement('div')
+          en.className = 'en'
+          en.textContent = '[' + x.ref + '] ' + x.note
+          m.appendChild(en)
+        }
+      })
+      if (e.images && e.images.length) m.appendChild(entryImages(e))
       g.appendChild(m)
       var meta = document.createElement('div')
       meta.className = 'meta'
@@ -355,7 +419,7 @@
       ty.appendChild(tt)
       list.appendChild(ty)
       var st = staleItem()
-      if (st) {
+      if (st && staleDismissed !== (st.e.itemId || st.e.id)) {
         var hint = document.createElement('div')
         hint.className = 'stale'
         hint.setAttribute('data-uifb-stale', '1')
@@ -367,7 +431,14 @@
         nb.setAttribute('data-a', 'nudge')
         nb.setAttribute('data-id', st.e.itemId || st.e.id)
         nb.textContent = L('Chép lời nhắc', 'Copy reminder')
-        hint.appendChild(ht); hint.appendChild(nb)
+        var xb = document.createElement('button')
+        xb.className = 'x'
+        xb.setAttribute('data-a', 'unstale')
+        xb.setAttribute('data-id', st.e.itemId || st.e.id)
+        xb.title = L('Đóng', 'Close')
+        xb.setAttribute('aria-label', xb.title)
+        xb.textContent = '×'
+        hint.appendChild(xb); hint.appendChild(ht); hint.appendChild(nb)
         list.appendChild(hint)
       }
     }
@@ -398,14 +469,20 @@
     fab.classList.toggle('on', v)
     applyPin()
     if (!v && picking) stopPicking()
+    placeMarks() // huy hiệu chỉ hiện khi khung chat mở
     if (v) {
       unread = 0
       updateBadge()
-      connect().then(function () { clampChat(); render(); list.scrollTop = list.scrollHeight; if (open && !noPick && !picking && !picked) startPicking() }).catch(function () {
+      connect().then(function () { clampChat(); render(); list.scrollTop = list.scrollHeight; if (open && !noPick && !picking && !picks.length) startPicking() }).catch(function (e) {
         list.textContent = ''
         var em = document.createElement('div')
         em.className = 'empty'
-        em.textContent = L('Không kết nối được bridge (', 'Cannot reach the bridge (') + BRIDGE + L('). Chạy: tl-ui-feedback start', '). Run: tl-ui-feedback start')
+        // 403: site ngoài localhost chưa được allow (bridge chặn cả CORS nên fetch lỗi mạng), hoặc thiếu/sai khóa ghép cặp.
+        em.textContent = e && e.status === 403
+          ? L('Bridge từ chối trang này. Chạy: tl-ui-feedback allow ', 'The bridge refused this page. Run: tl-ui-feedback allow ') + location.origin + L(' rồi mở trang bằng bookmarklet lệnh đó in ra.', ' and open the page with the bookmarklet it prints.')
+          : L('Không kết nối được bridge (', 'Cannot reach the bridge (') + BRIDGE + L('). Chạy: tl-ui-feedback start', '). Run: tl-ui-feedback start') +
+            (/^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/.test(location.origin) ? '' : L('. Site ngoài localhost cần: tl-ui-feedback allow ', '. A site outside localhost needs: tl-ui-feedback allow ') + location.origin +
+              L(', và cho phép trang truy cập mạng cục bộ khi trình duyệt hỏi (biểu tượng ổ khóa → Quyền).', ', and the page must be allowed to access the local network when the browser asks (padlock icon → Permissions).'))
         list.appendChild(em)
       })
       render()
@@ -601,13 +678,58 @@
     var o = d === document ? { x: 0, y: 0, sx: 1, sy: 1 } : frameXform(d), q = t || e
     return { x: o.x + o.sx * q.clientX, y: o.y + o.sy * q.clientY }
   }
+  // ---------- Đo phần tử (box model kiểu DevTools): margin cam, padding xanh lá, nội dung xanh dương + nhãn số đo ----------
+  var MEASURE_KEY = 'uifb.measure', measureOn = false
+  try { measureOn = localStorage.getItem(MEASURE_KEY) === '1' } catch (_) {}
+  function makeBM(parent) {
+    var bm = {}
+    ;['bmm', 'bmp', 'bmi'].forEach(function (c) { var d = document.createElement('div'); d.className = c; parent.appendChild(d); bm[c] = d })
+    return bm
+  }
+  function hideBM(bm) { if (bm) bm.bmm.style.display = bm.bmp.style.display = bm.bmi.style.display = 'none' }
+  function rmBM(bm) { if (bm) { bm.bmm.remove(); bm.bmp.remove(); bm.bmi.remove() } }
+  function px(v) { return Math.round((parseFloat(v) || 0) * 10) / 10 }
+  // Viết gọn 4 cạnh như shorthand CSS: "8", "8 12", "8 12 4", "8 12 4 2"
+  function sides(a) {
+    if (a[1] === a[3]) { if (a[0] === a[2]) return a[0] === a[1] ? '' + a[0] : a[0] + ' ' + a[1]; return a[0] + ' ' + a[1] + ' ' + a[2] }
+    return a.join(' ')
+  }
+  function four(cs, pre, suf) { return ['top', 'right', 'bottom', 'left'].map(function (s) { return px(cs.getPropertyValue(pre + s + (suf || ''))) }) }
+  function drawBM(bm, el) {
+    var win = el.ownerDocument.defaultView, cs = win.getComputedStyle(el), br = el.getBoundingClientRect(), t = frameXform(el.ownerDocument)
+    var m = four(cs, 'margin-'), p = four(cs, 'padding-'), b = four(cs, 'border-', '-width')
+    var mc = m.map(function (v) { return Math.max(0, v) })
+    var X = function (x) { return t.x + t.sx * x }, Y = function (y) { return t.y + t.sy * y }
+    var ml = br.left - mc[3], mt = br.top - mc[0]
+    bm.bmm.style.cssText = 'display:block;left:' + X(ml) + 'px;top:' + Y(mt) + 'px;width:' + t.sx * (br.width + mc[1] + mc[3]) + 'px;height:' + t.sy * (br.height + mc[0] + mc[2]) + 'px;border-width:' +
+      t.sy * mc[0] + 'px ' + t.sx * mc[1] + 'px ' + t.sy * mc[2] + 'px ' + t.sx * mc[3] + 'px'
+    bm.bmp.style.cssText = 'display:block;left:' + X(br.left + b[3]) + 'px;top:' + Y(br.top + b[0]) + 'px;width:' + Math.max(0, t.sx * (br.width - b[1] - b[3])) + 'px;height:' + Math.max(0, t.sy * (br.height - b[0] - b[2])) + 'px;border-width:' +
+      t.sy * p[0] + 'px ' + t.sx * p[1] + 'px ' + t.sy * p[2] + 'px ' + t.sx * p[3] + 'px'
+    var i = bm.bmi
+    i.innerHTML = ''
+    var w = document.createElement('b'); w.textContent = px(br.width) + ' × ' + px(br.height)
+    i.appendChild(w)
+    i.appendChild(document.createTextNode('\npadding ' + sides(p) + '\nmargin  ' + sides(m) + (b.some(Boolean) ? '\nborder  ' + sides(b) : '')))
+    i.style.cssText = 'display:block;left:0;top:0;visibility:hidden'
+    var iw = i.offsetWidth, ih = i.offsetHeight, bottom = Y(br.bottom + mc[2]), top = Y(mt)
+    var y = bottom + 4 + ih <= window.innerHeight ? bottom + 4 : top - ih - 4 >= 0 ? top - ih - 4 : Math.max(0, window.innerHeight - ih)
+    i.style.cssText = 'display:block;left:' + Math.max(0, Math.min(X(ml), window.innerWidth - iw)) + 'px;top:' + y + 'px'
+  }
+  var hbm = makeBM($('.hbm')), measureBtn = $('[data-a="measure"]')
+  function applyMeasure() {
+    measureBtn.classList.toggle('on', measureOn)
+    box.classList.toggle('bm', measureOn)
+    if (picking && current) drawBox(current); else hideBM(hbm)
+    placeMarks()
+  }
   function drawBox(el) {
+    if (measureOn && el) drawBM(hbm, el); else hideBM(hbm)
     if (!el) { box.style.display = tag.style.display = 'none'; return }
     var r = topRect(el)
     box.style.cssText = 'display:block;left:' + r.left + 'px;top:' + r.top + 'px;width:' + r.width + 'px;height:' + r.height + 'px'
     var f = fiberOf(el), label = el.tagName.toLowerCase()
     for (var g = f; g; g = g.return) { var n = typeof g.type !== 'string' && nameOf(g.type); if (n && n !== 'View' && n !== 'Text') { label = n + ' · ' + label; break } }
-    tag.textContent = label + '  ' + Math.round(r.width) + '×' + Math.round(r.height)
+    tag.textContent = label + '  ' + Math.round(r.width) + '×' + Math.round(r.height) + (picks.length ? L('  ·  Ctrl+click: thêm', '  ·  Ctrl+click: add') : '')
     tag.style.cssText = 'display:block;left:' + Math.max(0, r.left) + 'px;top:' + Math.max(0, r.top - 20) + 'px'
   }
   var movePt = null, moveRaf = 0
@@ -627,17 +749,32 @@
     if (!picking || inHost(e)) return
     e.preventDefault(); e.stopPropagation(); e.stopImmediatePropagation()
   }
-  function pickEl(el) {
+  // Chế độ chọn giữ nguyên (tắt bằng Esc, nút hoặc Alt+Shift+K). Click thường: THAY phần tử đã chọn (như bản một phần tử), focus ô tin nhắn.
+  // Ctrl+click (Cmd+click trên macOS): THÊM phần tử, focus ô ghi chú riêng của nó; click lại phần tử đã có thì chỉ focus ghi chú của nó.
+  function pickEl(el, add) {
     if (!el) return
-    picked = extract(el) // chế độ chọn giữ nguyên: click tiếp sẽ thay phần tử đã chọn; tắt bằng Esc, nút hoặc Alt+Shift+K
+    if (!add) {
+      if (!(picks.length === 1 && picks[0].el === el)) { clearPicks(); picks.push({ ref: REFS[0], el: el, data: extract(el), note: '' }); nextRef = 1; showSelected() }
+      msg.textContent = ''
+      ta.focus()
+      return
+    }
+    for (var i = 0; i < picks.length; i++) if (picks[i].el === el) return focusPick(picks[i].ref)
+    if (picks.length >= REFS.length) { msg.textContent = L('Tối đa ' + REFS.length + ' phần tử mỗi lần gửi.', 'At most ' + REFS.length + ' elements per message.'); return }
+    var used = picks.map(function (p) { return p.ref }), ref = null
+    for (var j = nextRef; j < REFS.length && !ref; j++) if (used.indexOf(REFS[j]) < 0) ref = REFS[j]
+    for (var k = 0; k < REFS.length && !ref; k++) if (used.indexOf(REFS[k]) < 0) ref = REFS[k]
+    nextRef = REFS.indexOf(ref) + 1
+    picks.push({ ref: ref, el: el, data: extract(el), note: '' })
+    msg.textContent = ''
     showSelected()
-    ta.focus()
+    focusPick(ref)
   }
   function onClick(e) {
     if (!picking || inHost(e)) return
     swallow(e)
     var p = evPoint(e)
-    pickEl(elementAt(p.x, p.y) || current)
+    pickEl(elementAt(p.x, p.y) || current, e.ctrlKey || e.metaKey || multiOn)
   }
   // Cảm ứng (kể cả giả lập mobile của Chrome): touchstart/touchend gắn ở document bị Chrome coi là passive nên KHÔNG được preventDefault ở touchstart
   // (báo "[Intervention] Unable to preventDefault inside passive event listener"). Cách làm: touchstart/touchmove chỉ cập nhật khung và chặn lan ra site
@@ -667,22 +804,118 @@
     if (!tap || !t) return
     if (e.cancelable) e.preventDefault() // chặn click giả sau cú chạm để site không nhận
     var p = evPoint(e, t)
-    pickEl(elementAt(p.x, p.y) || current)
+    pickEl(elementAt(p.x, p.y) || current, multiOn)
   }
+  // Vẽ lại danh sách phần tử đã chọn (nhãn bấm để chèn [X], tên, ô ghi chú riêng, ×) và tạo huy hiệu cho phần tử mới.
   function showSelected() {
-    if (!picked) { selBox.classList.remove('show'); return }
-    selLbl.textContent = (picked.components.slice(0, 3).join(' › ') || picked.element.tag.toLowerCase()) + '  ·  ' + picked.element.selector.slice(-50)
-    selBox.classList.add('show')
+    selBox.textContent = ''
+    picks.forEach(function (p) {
+      var row = document.createElement('div')
+      row.className = 'pk'
+      row.setAttribute('data-ref', p.ref)
+      var rb = document.createElement('button')
+      rb.className = 'ref'; rb.textContent = p.ref
+      rb.setAttribute('data-a', 'ref'); rb.setAttribute('data-ref', p.ref)
+      rb.title = L('Chèn [' + p.ref + '] vào tin nhắn (Alt+' + p.ref + ')', 'Insert [' + p.ref + '] into the message (Alt+' + p.ref + ')')
+      var lb = document.createElement('span')
+      lb.className = 'lbl'
+      lb.textContent = (p.data.components.slice(0, 3).join(' › ') || p.data.element.tag.toLowerCase()) + '  ·  ' + p.data.element.selector.slice(-50)
+      lb.title = p.data.element.selector
+      var inp = document.createElement('input')
+      inp.type = 'text'; inp.maxLength = 1000; inp.value = p.note
+      inp.placeholder = L('Ghi chú cho ' + p.ref + ' (tuỳ chọn)', 'Note for ' + p.ref + ' (optional)')
+      inp.addEventListener('input', function () { p.note = inp.value })
+      var x = document.createElement('button')
+      x.className = 'b'; x.textContent = '×'
+      x.setAttribute('data-a', 'unpick'); x.setAttribute('data-ref', p.ref)
+      x.title = L('Bỏ phần tử ' + p.ref, 'Remove element ' + p.ref)
+      row.appendChild(rb); row.appendChild(lb); row.appendChild(inp); row.appendChild(x)
+      selBox.appendChild(row)
+      if (!p.mk) {
+        var o = document.createElement('div'); o.className = 'mko'
+        var b = document.createElement('button'); b.className = 'mkb'; b.textContent = p.ref
+        b.setAttribute('data-a', 'mark'); b.setAttribute('data-ref', p.ref)
+        b.title = L('Sửa ghi chú cho ' + p.ref, 'Edit the note for ' + p.ref)
+        var bm = makeBM(mks)
+        mks.appendChild(o); mks.appendChild(b)
+        p.mk = { o: o, b: b, bm: bm }
+      }
+    })
+    selBox.classList.toggle('show', picks.length > 0)
+    placeMarks()
   }
+  function pickOf(ref) { for (var i = 0; i < picks.length; i++) if (picks[i].ref === ref) return picks[i]; return null }
+  function focusPick(ref) {
+    var inp = selBox.querySelector('.pk[data-ref="' + ref + '"] input')
+    if (inp) { inp.focus(); inp.scrollIntoView({ block: 'nearest' }) }
+  }
+  function unpick(ref) {
+    var p = pickOf(ref)
+    if (!p) return
+    dropMk(p)
+    picks.splice(picks.indexOf(p), 1)
+    if (!picks.length) nextRef = 0
+    showSelected()
+  }
+  function dropMk(p) { if (p.mk) { p.mk.o.remove(); p.mk.b.remove(); rmBM(p.mk.bm) } }
+  function clearPicks() {
+    picks.forEach(dropMk)
+    picks = []; nextRef = 0
+    showSelected()
+  }
+  // Chèn [X] tại vị trí con trỏ (hoặc thay đoạn đang bôi đen) của ô `f` — mặc định là tin nhắn chung.
+  // Phát sự kiện input để ô ghi chú riêng cập nhật p.note như khi gõ tay.
+  function insertRef(ref, f) {
+    f = f || ta
+    var s = f.selectionStart, e = f.selectionEnd, tok = '[' + ref + ']'
+    if (s == null) { s = e = f.value.length }
+    f.setRangeText(tok, s, e, 'end')
+    f.dispatchEvent(new Event('input', { bubbles: true }))
+    f.focus()
+  }
+  // Alt+A…J trong vùng soạn tin: chèn [A]…[J] của phần tử đã chọn vào ô đang gõ. Không có Shift/Ctrl/Meta
+  // (Alt+Shift+K/H đã dùng; AltGr trên Windows là Ctrl+Alt nên gõ ký tự đặc biệt vẫn được).
+  // Lấy chữ từ e.key; macOS Option+A cho e.key 'å' nên dùng e.code. Nhãn chưa được chọn thì để phím đi qua.
+  function refKey(e) {
+    if (!e.altKey || e.shiftKey || e.ctrlKey || e.metaKey) return null
+    var k = /^[a-z]$/i.test(e.key) ? e.key.toUpperCase() : (/^Key[A-Z]$/.test(e.code) ? e.code.slice(3) : null)
+    return k && picks.some(function (p) { return p.ref === k }) ? k : null
+  }
+  // Huy hiệu bám theo phần tử: đặt lại vị trí khi cuộn (mọi document đã gắn listener, kể cả iframe), đổi cỡ, và định kỳ (bố cục đổi).
+  // Phần tử không còn trên trang (bị render lại/xoá) thì ẩn huy hiệu nhưng vẫn giữ dữ liệu đã trích để gửi.
+  var markRaf = 0
+  function placeMarks() {
+    markRaf = 0
+    picks.forEach(function (p) {
+      if (!p.mk) return
+      var r = open && p.el.isConnected && p.el.ownerDocument.defaultView ? topRect(p.el) : null
+      if (!r || (!r.width && !r.height)) { p.mk.o.style.display = p.mk.b.style.display = 'none'; hideBM(p.mk.bm); return }
+      if (measureOn) drawBM(p.mk.bm, p.el); else hideBM(p.mk.bm)
+      p.mk.o.style.cssText = 'display:block;left:' + r.left + 'px;top:' + r.top + 'px;width:' + r.width + 'px;height:' + r.height + 'px'
+      p.mk.b.style.cssText = 'display:block;left:' + Math.max(0, r.left - 9) + 'px;top:' + Math.max(0, r.top - 9) + 'px'
+    })
+  }
+  function scheduleMarks() { if (!markRaf && picks.length && open) markRaf = requestAnimationFrame(placeMarks) }
+  window.addEventListener('resize', scheduleMarks)
+  setInterval(scheduleMarks, 400)
+  ta.addEventListener('input', function () { if (warnedNote !== null) { warnedNote = null; msg.textContent = '' } }) // sửa câu thì bỏ cảnh báo [X] cũ
+  mks.addEventListener('click', function (e) {
+    var t = e.target && e.target.closest ? e.target.closest('[data-a="mark"]') : null
+    if (t) focusPick(t.getAttribute('data-ref'))
+  })
   function startPicking() {
-    picking = true; pickBtn.classList.add('on'); pickBtn.textContent = L('Đang chọn… (Esc)', 'Picking… (Esc)')
+    picking = true; pickBtn.classList.add('on'); btnText(pickBtn, L('Đang chọn… (Esc)', 'Picking… (Esc)'))
     hookFrames(document); setCursor('crosshair')
   }
   function stopPicking() {
-    picking = false; pickBtn.classList.remove('on'); pickBtn.textContent = L('Chọn phần tử', 'Pick element')
+    picking = false; setMulti(false); pickBtn.classList.remove('on'); btnText(pickBtn, L('Chọn phần tử', 'Pick element'))
     setCursor('')
     drawBox(null)
     pevReset() // không giữ MutationObserver/bộ nhớ đệm khi không chọn
+  }
+  function setMulti(v) {
+    multiOn = v
+    var b = $('[data-a="multi"]'); b.classList.toggle('on', v); b.setAttribute('aria-pressed', v ? 'true' : 'false')
   }
   function togglePick() {
     if (picking) return stopPicking()
@@ -690,18 +923,156 @@
     connect().then(startPicking).catch(function () { msg.textContent = L('Không kết nối được bridge.', 'Cannot reach the bridge.') })
   }
 
+  // ---------- Ảnh đính kèm ----------
+  function b64(blob) {
+    return new Promise(function (ok, no) {
+      var r = new FileReader()
+      r.onload = function () { ok(String(r.result).replace(/^data:[^,]*,/, '')) }
+      r.onerror = function () { no(r.error) }
+      r.readAsDataURL(blob)
+    })
+  }
+  function loadImg(blob) {
+    return new Promise(function (ok, no) {
+      var u = URL.createObjectURL(blob), im = new Image()
+      im.onload = function () { ok({ im: im, url: u }) }
+      im.onerror = function () { URL.revokeObjectURL(u); no(new Error(L('không đọc được ảnh', 'cannot read the image'))) }
+      im.src = u
+    })
+  }
+  function toBlob(cv, type, q) { return new Promise(function (ok) { cv.toBlob(ok, type, q) }) }
+  // Ảnh nhỏ, đúng định dạng thì gửi nguyên; còn lại vẽ lại qua canvas (cạnh dài ≤ MAX_ATT_SIDE), thử WebP rồi JPEG.
+  function prepImage(file) {
+    return loadImg(file).then(function (x) {
+      var w = x.im.naturalWidth, h = x.im.naturalHeight
+      var keep = /^image\/(png|jpeg|webp|gif)$/.test(file.type) && file.size <= MAX_ATT_BYTES && Math.max(w, h) <= MAX_ATT_SIDE
+      if (keep) return b64(file).then(function (d) { return { data: d, mime: file.type, w: w, h: h, url: x.url } })
+      var k = Math.min(1, MAX_ATT_SIDE / Math.max(w, h)), cw = Math.max(1, Math.round(w * k)), ch = Math.max(1, Math.round(h * k))
+      var cv = document.createElement('canvas'); cv.width = cw; cv.height = ch
+      var cx = cv.getContext('2d'); cx.fillStyle = '#fff'; cx.fillRect(0, 0, cw, ch); cx.drawImage(x.im, 0, 0, cw, ch)
+      URL.revokeObjectURL(x.url)
+      return toBlob(cv, 'image/webp', 0.85).then(function (bl) {
+        // Trình duyệt không hỗ trợ WebP trả PNG: dùng JPEG. Còn quá lớn thì giảm chất lượng.
+        if (bl && bl.type === 'image/webp' && bl.size <= MAX_ATT_BYTES) return bl
+        return toBlob(cv, 'image/jpeg', 0.85).then(function (j) { return j && j.size <= MAX_ATT_BYTES ? j : toBlob(cv, 'image/jpeg', 0.6) })
+      }).then(function (bl) {
+        if (!bl || bl.size > MAX_ATT_BYTES) throw new Error(L('ảnh quá lớn', 'image too large'))
+        return b64(bl).then(function (d) { return { data: d, mime: bl.type, w: cw, h: ch, url: URL.createObjectURL(bl) } })
+      })
+    })
+  }
+  function addFiles(files) {
+    var imgs = [].filter.call(files || [], function (f) { return f && /^image\//.test(f.type) })
+    if (!imgs.length) { msg.textContent = L('Chỉ đính kèm được ảnh.', 'Only images can be attached.'); return }
+    var room = MAX_ATT - atts.length - attPending
+    msg.textContent = imgs.length > room ? L('Tối đa ' + MAX_ATT + ' ảnh mỗi tin.', 'At most ' + MAX_ATT + ' images per message.') : ''
+    imgs.slice(0, Math.max(room, 0)).forEach(function (f) {
+      attPending++
+      prepImage(f).then(function (a) {
+        attPending--
+        if (atts.length >= MAX_ATT) { URL.revokeObjectURL(a.url); return }
+        atts.push(a); showAtts()
+      }).catch(function (e) { attPending--; msg.textContent = L('Không đính kèm được ảnh: ', 'Could not attach the image: ') + e.message })
+    })
+  }
+  function showAtts() {
+    attBox.textContent = ''
+    attBox.classList.toggle('show', atts.length > 0)
+    atts.forEach(function (a, i) {
+      var th = document.createElement('span'); th.className = 'th'
+      var im = document.createElement('img'); im.src = a.url; im.alt = 'img' + (i + 1)
+      var tk = document.createElement('button'); tk.className = 'tk'; tk.textContent = 'img' + (i + 1); tk.setAttribute('data-a', 'atok'); tk.setAttribute('data-i', i)
+      tk.title = L('Chèn [img' + (i + 1) + '] vào ghi chú', 'Insert [img' + (i + 1) + '] into the note')
+      var x = document.createElement('button'); x.textContent = '×'; x.setAttribute('data-a', 'unatt'); x.setAttribute('data-i', i); x.title = L('Bỏ ảnh này', 'Remove this image')
+      th.appendChild(im); th.appendChild(tk); th.appendChild(x); attBox.appendChild(th)
+    })
+  }
+  // Bỏ một ảnh thì ảnh sau dồn lên (img3 thành img2): khác nhãn phần tử, vì [imgN] hiếm khi đã được gõ trước khi bỏ ảnh.
+  function removeAtt(i) { var a = atts.splice(i, 1)[0]; if (a) URL.revokeObjectURL(a.url); showAtts() }
+  function clearAtts() { atts.forEach(function (a) { URL.revokeObjectURL(a.url) }); atts = []; showAtts() }
+  // Thumbnail trong lịch sử: lấy từ bridge (cần token) một lần rồi giữ objectURL.
+  function entryImages(e) {
+    var w = document.createElement('div'); w.className = 'ims'
+    e.images.forEach(function (g) {
+      var key = e.itemId + ':' + g.n, u = thumbs[key]
+      if (e.imagesEvicted || u === 'gone') {
+        var sp = document.createElement('span'); sp.textContent = '[img' + g.n + '] ' + L('không còn', 'gone'); w.appendChild(sp); return
+      }
+      var a = document.createElement('a'); a.target = '_blank'; a.rel = 'noopener'; a.title = 'img' + g.n + (g.w ? ' · ' + g.w + '×' + g.h : '')
+      var im = document.createElement('img'); im.alt = 'img' + g.n
+      a.appendChild(im); w.appendChild(a)
+      if (u) { a.href = u; im.src = u; return }
+      if (u === undefined) {
+        thumbs[key] = null
+        api('/api/image?id=' + encodeURIComponent(e.itemId) + '&n=' + g.n).then(function (r) {
+          if (!r.ok) { var er = new Error(r.status); er.status = r.status; throw er }
+          return r.blob()
+        }).then(function (bl) { thumbs[key] = URL.createObjectURL(bl); render() })
+          .catch(function (er) {
+            // 404/410: bridge không còn ảnh. Lỗi khác (mạng, bridge đang khởi động lại) là tạm thời: thử lại sau, tối đa 3 lần.
+            var tries = thumbTries[key] = (thumbTries[key] || 0) + 1
+            if (er.status === 404 || er.status === 410 || tries >= 3) { thumbs[key] = 'gone'; render(); return }
+            setTimeout(function () { delete thumbs[key]; render() }, 2000 * tries)
+          })
+      }
+    })
+    return w
+  }
+  // Dán ảnh vào ô ghi chú (chung hoặc riêng). Clipboard có cả chữ (copy từ Word/Excel) thì để dán chữ như thường.
+  cmp.addEventListener('paste', function (e) {
+    var dt = e.clipboardData
+    if (!dt || [].indexOf.call(dt.types || [], 'text/plain') >= 0) return
+    var files = [].map.call(dt.items || [], function (it) { return it.kind === 'file' ? it.getAsFile() : null }).filter(function (f) { return f && /^image\//.test(f.type) })
+    if (!files.length) return
+    e.preventDefault(); e.stopPropagation()
+    addFiles(files)
+  })
+  var dragN = 0
+  function hasFiles(e) { return e.dataTransfer && [].indexOf.call(e.dataTransfer.types || [], 'Files') >= 0 }
+  chat.addEventListener('dragenter', function (e) { if (hasFiles(e)) { e.preventDefault(); dragN++; cmp.classList.add('drop') } })
+  chat.addEventListener('dragover', function (e) { if (hasFiles(e)) { e.preventDefault(); e.dataTransfer.dropEffect = 'copy' } })
+  chat.addEventListener('dragleave', function (e) { if (hasFiles(e) && --dragN <= 0) { dragN = 0; cmp.classList.remove('drop') } })
+  chat.addEventListener('drop', function (e) {
+    if (!hasFiles(e)) return
+    e.preventDefault(); e.stopPropagation()
+    dragN = 0; cmp.classList.remove('drop')
+    addFiles(e.dataTransfer.files)
+  })
+  fileIn.addEventListener('change', function () { addFiles(fileIn.files); fileIn.value = '' })
+
   // ---------- Gửi ----------
   function send() {
     var note = ta.value.trim()
-    if (!note) { msg.textContent = L('Hãy gõ ghi chú trước.', 'Type a note first.'); return }
+    if (attPending) { msg.textContent = L('Đang xử lý ảnh, đợi một chút rồi bấm Gửi lại.', 'Still processing an image; wait a moment, then press Send again.'); return }
+    if (!note && !atts.length && !picks.some(function (p) { return p.note.trim() })) { msg.textContent = L('Hãy gõ ghi chú hoặc dán ảnh trước.', 'Type a note or paste an image first.'); return }
+    // Token [X] không khớp phần tử nào đã chọn: cảnh báo một lần, bấm Gửi lần nữa (tin không đổi) thì vẫn gửi.
+    var refs = picks.map(function (p) { return p.ref }), bad = []
+    note.replace(/\[([A-Z])\]/g, function (_, r) { if (refs.indexOf(r) < 0 && bad.indexOf(r) < 0) bad.push(r) })
+    if (bad.length && warnedNote !== note) {
+      warnedNote = note
+      var toks = '[' + bad.join('], [') + ']'
+      msg.textContent = L(toks + ' không khớp phần tử nào đã chọn. Bấm Gửi lần nữa để vẫn gửi.', toks + ' matches no picked element. Press Send again to send anyway.')
+      return
+    }
+    warnedNote = null
     var body = { note: note, lang: LANG, url: location.href, metroOrigin: location.origin, viewport: { w: window.innerWidth, h: window.innerHeight, dpr: window.devicePixelRatio } }
-    if (picked) { body.element = picked.element; body.components = picked.components; body.stacks = picked.stacks; body.debugSources = picked.debugSources }
+    if (picks.length) {
+      body.elements = picks.map(function (p) {
+        return { ref: p.ref, note: p.note.trim() || null, element: p.data.element, components: p.data.components, stacks: p.data.stacks, debugSources: p.data.debugSources }
+      })
+      // Một phần tử: gửi thêm dạng cũ để bridge bản cũ còn chạy nền (đọc overlay mới từ đĩa) vẫn nhận được phần tử.
+      // Bridge mới ưu tiên elements[] và bỏ qua các trường này.
+      if (picks.length === 1) { body.element = picks[0].data.element; body.components = picks[0].data.components; body.stacks = picks[0].data.stacks; body.debugSources = picks[0].data.debugSources }
+    }
+    if (atts.length) body.images = atts.map(function (a) { return { data: a.data, mime: a.mime, w: a.w, h: a.h } })
     msg.textContent = L('Đang gửi…', 'Sending…')
     connect().then(function () {
+      // Bridge cũ còn chạy nền (chưa biết ảnh): ảnh lớn bị 413, ảnh nhỏ bị bỏ không báo. Giữ nguyên tin để gửi lại sau khi thay bridge.
+      if (body.images && !bridgeImages) throw new Error(L('bridge đang chạy là bản cũ, chưa nhận ảnh: chạy `tl-ui-feedback stop` rồi tải lại trang.', 'the running bridge is outdated and does not take images: run `tl-ui-feedback stop`, then reload the page.'))
       return api('/api/feedback', { method: 'POST', body: JSON.stringify(body) })
     }).then(function (r) { return r.json().then(function (j) { return { ok: r.ok, j: j } }) }).then(function (x) {
       if (!x.ok) throw new Error(x.j.error || L('lỗi', 'error'))
-      ta.value = ''; picked = null; showSelected(); msg.textContent = ''
+      ta.value = ''; clearPicks(); clearAtts(); msg.textContent = ''
       return loadHistory().then(function () { render(true) }) // đồng bộ chắc chắn kể cả khi SSE chưa kịp tới; render(true) cuộn xuống cuối để thấy tin vừa gửi
     }).catch(function (e) { msg.textContent = L('Lỗi: ', 'Error: ') + e.message })
   }
@@ -710,12 +1081,19 @@
     var a = t && t.getAttribute('data-a')
     if (a === 'send') send()
     else if (a === 'pick') togglePick()
+    else if (a === 'multi') setMulti(!multiOn)
+    else if (a === 'attach') fileIn.click()
+    else if (a === 'unatt') { removeAtt(+t.getAttribute('data-i')); ta.focus() }
+    else if (a === 'atok') insertRef('img' + (+t.getAttribute('data-i') + 1))
     else if (a === 'resend') resend(t)
-    else if (a === 'unpick') { picked = null; showSelected() }
+    else if (a === 'unpick') { unpick(t.getAttribute('data-ref')); ta.focus() }
+    else if (a === 'ref') insertRef(t.getAttribute('data-ref'))
     else if (a === 'close') setOpen(false)
     else if (a === 'clear') clearHistory()
     else if (a === 'pin') { pinned = !pinned; savePin(); applyPin() }
     else if (a === 'connect') copyConnect()
+    else if (a === 'measure') { measureOn = !measureOn; try { localStorage.setItem(MEASURE_KEY, measureOn ? '1' : '0') } catch (_) {} applyMeasure() }
+    else if (a === 'unstale') { staleDismissed = t.getAttribute('data-id'); render() }
     else if (a === 'nudge') copyPrompt(t, nudgePrompt(t.getAttribute('data-id')), L('Đã chép lời nhắc: dán vào terminal của agent.', 'Reminder copied: paste it into the agent\'s terminal.'))
   })
   // Gửi lại tin cũ: bridge nhân bản item (kèm phần tử đã chọn); nếu bridge không còn item đó (404) thì gửi lại riêng nội dung chữ.
@@ -811,7 +1189,7 @@
     fetch('/__uifb/version', { cache: 'no-store' }).then(function (r) { return r.ok ? r.json() : null }).then(function (j) {
       if (!j || !liveBox.checked) return
       if (liveV === null) liveV = j.v
-      else if (j.v !== liveV) { if (ta.value.trim()) return; location.reload() } // đang gõ dở ghi chú thì chờ, đừng làm mất
+      else if (j.v !== liveV) { if (ta.value.trim() || picks.length) return; location.reload() } // đang gõ dở ghi chú / có phần tử chờ gửi thì chờ, đừng làm mất
     }).catch(function () {})
   }
   function liveApply() {
@@ -826,6 +1204,7 @@
     try { liveBox.checked = localStorage.getItem(LIVE_KEY) === '1' } catch (_) {}
     liveApply()
   }).catch(function () {})
+  applyMeasure()
   // ---------- Ghim bên phải + kéo mép trái đổi chiều rộng ----------
   var pinBtn = $('[data-a="pin"]'), rzw = $('.rzw'), PIN_KEY = 'uifb.pin'
   function maxPinW() { return Math.max(280, Math.min(900, Math.floor(window.innerWidth * 0.8))) }
@@ -838,6 +1217,24 @@
   }
   // Phần tử position:fixed dính mép phải (panel ghim riêng của site, header/thanh toàn chiều rộng) không co theo width của <html>
   // nên vẫn nằm dưới khung chat: dịch mép phải của chúng sang trái đúng bằng chiều rộng khung, sau đó khôi phục nguyên trạng khi bỏ ghim.
+  // position:absolute không có tổ tiên nào được định vị (popover kiểu `#pop{position:absolute;right:12px}` ngay trong body) cũng vậy:
+  // nó neo theo viewport, không theo <html>, nên xử lý giống fixed. Chỉ xét `position` của tổ tiên, CỐ Ý bỏ qua transform/filter/contain:
+  // lượt quét chạy SAU khi <html> co, nên phần tử neo theo cha co theo trang không còn chạm mép phải và tự bị loại; còn chạm mép tức là
+  // cha không co (vd translate + 100vw), dịch nó là đúng. Phải chặn tổ tiên được định vị vì chúng (fixed/absolute) có thể cũng bị dịch → dịch hai lần.
+  function viewportAnchored(el, cs, memo) {
+    if (cs.position === 'fixed') return true
+    if (cs.position !== 'absolute') return false
+    var chain = [], p = el.parentElement, ok = true
+    while (p) {
+      if (memo.has(p)) { ok = memo.get(p); break }
+      chain.push(p)
+      if (getComputedStyle(p).position !== 'static') { ok = false; break }
+      p = p.parentElement
+    }
+    // memo[p] = "con absolute của p không có tổ tiên định vị": đúng cho mọi nút đã đi qua (kể cả nút chặn, khi kết luận là sai).
+    chain.forEach(function (a) { memo.set(a, ok) })
+    return ok
+  }
   var shifted = new Map(), shiftRaf = 0, shiftTimer = 0, shiftMo = null, lastScanMs = 0
   function unshiftFixed() {
     shifted.forEach(function (o, el) {
@@ -853,13 +1250,13 @@
     unshiftFixed()
     if (!(pinned && open && !hidden) || !document.body) return
     var t0 = performance.now()
-    var vw = window.innerWidth, edge = chat.getBoundingClientRect().left, els = document.body.getElementsByTagName('*') // edge: mép trái khung ghim (đã trừ thanh cuộn)
-    var todo = []
+    var vw = document.documentElement.clientWidth || window.innerWidth, edge = chat.getBoundingClientRect().left, els = document.body.getElementsByTagName('*') // edge: mép trái khung ghim (đã trừ thanh cuộn)
+    var todo = [], memo = new Map()
     for (var i = 0; i < els.length; i++) {
       var el = els[i]
       if (el === host || host.contains(el)) continue
       var cs = getComputedStyle(el)
-      if (cs.position !== 'fixed') continue
+      if (!viewportAnchored(el, cs, memo)) continue
       var r = el.getBoundingClientRect()
       if (!r.width || !r.height || r.right < vw - 24) continue // không chạm mép phải
       todo.push([el, cs.right, r.width])
@@ -881,7 +1278,7 @@
   }
   function scheduleShift(delay) {
     if (!(pinned && open && !hidden)) {
-      clearTimeout(shiftTimer); if (shiftRaf) cancelAnimationFrame(shiftRaf); shiftRaf = 0
+      clearTimeout(shiftTimer); shiftTimer = 0; if (shiftRaf) cancelAnimationFrame(shiftRaf); shiftRaf = 0
       if (shiftMo) { shiftMo.disconnect(); shiftMo = null }
       unshiftFixed()
       return
@@ -892,9 +1289,10 @@
         if (ms.every(function (m) { return host.contains(m.target) })) return
         scheduleShift(Math.max(250, Math.round(lastScanMs * 40))) // quét càng tốn thì càng thưa: tối đa khoảng 2,5% thời gian của luồng chính
       })
-      shiftMo.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['class', 'hidden'] })
+      shiftMo.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['class', 'hidden', 'style'] }) // style: popover mở bằng el.style.display (React…)
     }
-    if (delay) { clearTimeout(shiftTimer); shiftTimer = setTimeout(function () { if (!shiftRaf) shiftRaf = requestAnimationFrame(shiftFixed) }, delay) }
+    // Throttle, không debounce: trang có animation đổi style liên tục vẫn được quét lại định kỳ thay vì bị hoãn mãi.
+    if (delay) { if (!shiftTimer) shiftTimer = setTimeout(function () { shiftTimer = 0; if (!shiftRaf) shiftRaf = requestAnimationFrame(shiftFixed) }, delay) }
     else if (!shiftRaf) shiftRaf = requestAnimationFrame(shiftFixed)
   }
   function applyPin(dragging) {
@@ -955,10 +1353,13 @@
   }
   // onKeyDown (capture ở document) nhận phím từ textarea trước (sự kiện bàn phím là composed) và đánh dấu e._uifb;
   // ở đây chỉ xử lý khi nó chưa chạy (site chặn sự kiện ở window), nếu không Alt+Shift+K bị bật/tắt hai lần.
+  // Gắn ở cả vùng soạn tin: ô tin nhắn chung và các ô ghi chú riêng của từng phần tử (Ctrl+Enter gửi ở ô nào cũng được).
   ;['keydown', 'keyup', 'keypress'].forEach(function (t) {
-    ta.addEventListener(t, function (e) {
+    cmp.addEventListener(t, function (e) {
       e.stopPropagation()
+      var rk = t === 'keydown' && (e.target === ta || e.target.type === 'text') ? refKey(e) : null
       if (t === 'keydown' && e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); send() }
+      else if (rk) { e.preventDefault(); insertRef(rk, e.target) }
       else if (t !== 'keydown' || e._uifb) return
       else if (e.key === 'Escape' && picking) stopPicking()
       else if (isPickKey(e)) { e.preventDefault(); togglePick() }
@@ -1020,6 +1421,7 @@
     doc.addEventListener('touchend', onTouchEnd, { capture: true, passive: false })
     doc.addEventListener('click', onClick, true)
     doc.addEventListener('keydown', onKeyDown, true)
+    doc.addEventListener('scroll', scheduleMarks, true) // cuộn trang/iframe/vùng cuộn con: huy hiệu đi theo phần tử
     // iframe điều hướng thì document đổi: nghe 'load' để gắn lại; iframe thêm sau thì MutationObserver bắt
     if (typeof MutationObserver === 'function') {
       var mo = new MutationObserver(function (records) { if (hasIframe(records)) hookFrames(doc) }) // chỉ quét khi có iframe mới được thêm

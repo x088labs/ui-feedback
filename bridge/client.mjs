@@ -132,20 +132,43 @@ export async function poll({ origin, timeoutMs, allowAny = false, chunkMs = POLL
 export const reply = (text, id, origin) => api('POST', '/api/reply', { text, id, origin, who: pollerId() })
 export const status = () => api('GET', '/api/status')
 
-export function formatItem(it) {
-  const f = (it.source?.frames || []).filter((x) => x.file)
-  const lines = [
-    `# ${it.id}  ${it.url || ''}`,
-    `note: ${it.note}`,
-    ...(it.lang ? [`page_lang: ${it.lang}`] : []),
-    it.element?.tag ? `element: <${(it.element.tag || '?').toLowerCase()}> text=${JSON.stringify(it.element?.text || '')}${it.element?.testID ? ` testID=${it.element.testID}` : ''}` : 'element: (free message, no element picked)',
-    `selector: ${it.element?.selector || ''}`,
-    `rect: ${JSON.stringify(it.element?.rect || {})}  style: ${JSON.stringify(it.element?.style || {})}`,
-    `components: ${(it.source?.components || []).join(' > ')}`,
+// Phần mô tả một phần tử (selector, style, components, source). pad: thụt lề khi in trong danh sách nhiều phần tử.
+function elementLines(element, source, pad = '') {
+  const f = (source?.frames || []).filter((x) => x.file)
+  return [
+    element?.tag ? `element: <${(element.tag || '?').toLowerCase()}> text=${JSON.stringify(element?.text || '')}${element?.testID ? ` testID=${element.testID}` : ''}` : 'element: (free message, no element picked)',
+    `selector: ${element?.selector || ''}`,
+    `rect: ${JSON.stringify(element?.rect || {})}  style: ${JSON.stringify(element?.style || {})}`,
+    `components: ${(source?.components || []).join(' > ')}`,
     `source (open these files to fix):`,
     ...(f.length ? f.map((x) => `  - ${x.element}${x.createdIn ? ' <- ' + x.createdIn : ''}  ${x.file}:${x.line}:${x.column}`) : ['  (no source file; use selector/text/components)']),
+  ].map((l) => pad + l)
+}
+
+// Ảnh người dùng dán vào tin. Có `path` (CLI đã ghi ra thư mục tạm) thì in đường dẫn để agent mở; MCP gửi ảnh thành khối image ngay sau văn bản.
+function imageLines(imgs) {
+  if (!imgs?.length) return []
+  const size = (g) => (g.w && g.h ? ` ${g.w}x${g.h}` : '') + ` ${String(g.mime || '').replace('image/', '')}`
+  // CLI (đã thử ghi file: có path hoặc error) / MCP (còn data, gửi khối image) / ảnh đã bị bỏ khỏi bộ nhớ.
+  const where = imgs.some((g) => g.path || g.error)
+    ? 'open each file to see it'
+    : imgs.some((g) => g.data) ? 'shown as image blocks after this text' : 'dropped from memory, not available'
+  return [
+    `images: ${imgs.length} attached by the user (${where}); [img1], [img2]... in the note refer to them.`,
+    ...imgs.map((g) => `  - [img${g.n}]${size(g)}${g.path ? '  ' + g.path : g.error ? `  (could not save the file: ${g.error})` : ''}`),
   ]
-  return lines.join('\n')
+}
+
+export function formatItem(it) {
+  const els = Array.isArray(it.elements) ? it.elements : []
+  const head = [`# ${it.id}  ${it.url || ''}`, `note: ${it.note}`, ...(it.lang ? [`page_lang: ${it.lang}`] : []), ...imageLines(it.images)]
+  // 0–1 phần tử không có ghi chú riêng: giữ nguyên định dạng cũ.
+  if (els.length <= 1 && !els[0]?.note) return [...head, ...elementLines(it.element ?? els[0]?.element, it.source ?? els[0]?.source)].join('\n')
+  return [
+    ...head,
+    `elements: ${els.length} picked. [A], [B]... in the note refer to the element with that ref; each element may carry its own note.`,
+    ...els.flatMap((x) => ['', `## [${x.ref}]${x.note ? ' note: ' + x.note : ''}`, ...elementLines(x.element, x.source, '  ')]),
+  ].join('\n')
 }
 
 // Lời nhắc khi poll trả `unanswered`: agent đã nhận các tin này nhưng chưa gửi câu trả lời cuối lên trang.
@@ -157,7 +180,7 @@ export function formatUnanswered(r, { mcp = false } = {}) {
     `status: unanswered  count: ${list.length}`,
     '',
     'You received these items earlier but never sent the final reply, so the page still shows "Agent is working". Text you write in your terminal never reaches the user.',
-    ...list.map((u) => `\n# ${u.id}  ${u.url || u.origin || ''}\nnote: ${u.note}` + (u.lang ? `\npage_lang: ${u.lang}` : '')),
+    ...list.map((u) => `\n# ${u.id}  ${u.url || u.origin || ''}\nnote: ${u.note}` + (u.lang ? `\npage_lang: ${u.lang}` : '') + (u.images ? `\nimages: ${u.images} (sent with the original item)` : '')),
     '',
     `next_step: For each item: if you already handled or answered it, send that answer now with ${list.length === 1 ? replyCmd(list[0].id) : replyCmd('<id>')}. ` +
       `If you are still working on it, finish first (a short progress reply without id is fine), then send the final reply with its id. ${REPLY_LANG} Then run ${pollCmd}.`,

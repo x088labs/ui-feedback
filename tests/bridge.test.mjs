@@ -187,7 +187,8 @@ test('symbolicate: chặn metro không phải loopback (SSRF); lọc node_module
 test('body quá lớn bị từ chối', async () => {
   const s = await start()
   try {
-    const r = await s.post('/api/feedback', { note: 'x'.repeat(300 * 1024) }).catch(() => ({ status: 'reset' }))
+    // /api/feedback được nới để chở ảnh (tests/images.test.mjs kiểm route khác vẫn 256 KB).
+    const r = await s.post('/api/feedback', { note: 'x'.repeat(10 * 1024 * 1024) }).catch(() => ({ status: 'reset' }))
     assert.ok(r.status === 413 || r.status === 'reset')
   } finally { await s.stop() }
 })
@@ -292,6 +293,123 @@ test('SSE phát message và status', async () => {
   } finally { await s.stop() }
 })
 
+// ---------- Nhiều phần tử trong một tin ----------
+const elOf = (sel, text) => ({ element: { tag: 'BUTTON', text, selector: sel, rect: { x: 1, y: 2, w: 3, h: 4 } }, components: ['T', 'Sidebar'], stacks: STACK })
+const pollOne = async (s) => (await (await fetch(s.base + '/api/poll?ack=1&timeout=2000', { headers: s.H })).json()).items[0]
+
+test('một phần tử: payload cũ giữ nguyên, thêm elements[1]', async () => {
+  const s = await start()
+  try {
+    await s.post('/api/feedback', fb('sai màu'))
+    const it = await pollOne(s)
+    assert.equal(it.element.selector, '#a')
+    assert.equal(it.source.frames[0].file, 'F:/x/app/apps/src/shell/DesktopShell.tsx')
+    assert.equal(it.elements.length, 1)
+    assert.equal(it.elements[0].ref, 'A')
+    assert.equal(it.elements[0].note, null)
+    assert.deepEqual(it.elements[0].element, it.element)
+    assert.deepEqual(it.elements[0].source, it.source)
+  } finally { await s.stop() }
+})
+
+test('nhiều phần tử: một item, symbolicate từng phần tử, không có element top-level', async () => {
+  let calls = 0
+  const s = await start({ fetchImpl: async (u, init) => { calls++; return fakeFetch(u, init) } })
+  try {
+    const r = await s.post('/api/feedback', {
+      note: 'tại sao bấm [A] mà [B] không reload?', url: 'http://localhost:8091/', lang: 'vi',
+      elements: [{ ref: 'A', note: '  nút lưu  ', ...elOf('#save', 'Lưu') }, { ref: 'B', ...elOf('#table', '') }, { ref: 'C', note: 'x'.repeat(1500), ...elOf('#c', 'c') }],
+    })
+    assert.equal(r.status, 200)
+    const it = await pollOne(s)
+    assert.equal(calls, 3)
+    assert.equal(it.note, 'tại sao bấm [A] mà [B] không reload?')
+    assert.equal('element' in it, false)
+    assert.equal('source' in it, false)
+    assert.deepEqual(it.elements.map((x) => x.ref), ['A', 'B', 'C'])
+    assert.equal(it.elements[0].note, 'nút lưu')
+    assert.equal(it.elements[1].note, null)
+    assert.equal(it.elements[2].note.length, 1000)
+    assert.deepEqual(it.elements.map((x) => x.element.selector), ['#save', '#table', '#c'])
+    assert.ok(it.elements.every((x) => x.source.frames[0].file === 'F:/x/app/apps/src/shell/DesktopShell.tsx'))
+    // Mục chat có từng phần tử
+    const h = await (await fetch(s.base + '/api/history', { headers: s.H })).json()
+    assert.equal(h.entries[0].element, null)
+    assert.deepEqual(h.entries[0].elements.map((x) => [x.ref, x.note, x.label, x.file]), [
+      ['A', 'nút lưu', 'T › Sidebar', 'F:/x/app/apps/src/shell/DesktopShell.tsx:43'],
+      ['B', null, 'T › Sidebar', 'F:/x/app/apps/src/shell/DesktopShell.tsx:43'],
+      ['C', 'x'.repeat(1000), 'T › Sidebar', 'F:/x/app/apps/src/shell/DesktopShell.tsx:43'],
+    ])
+  } finally { await s.stop() }
+})
+
+test('nhiều phần tử: symbolicate chạy song song, kết quả vẫn đúng thứ tự', async () => {
+  let inFlight = 0, peak = 0
+  const s = await start({ fetchImpl: async (u, init) => {
+    inFlight++; peak = Math.max(peak, inFlight)
+    await new Promise((r) => setTimeout(r, 30))
+    inFlight--
+    return fakeFetch(u, init)
+  } })
+  try {
+    const r = await s.post('/api/feedback', { note: 'x', url: 'http://localhost:8091/', elements: [elOf('#a'), elOf('#b'), elOf('#c')] })
+    assert.equal(r.status, 200)
+    assert.equal(peak, 3)
+    const it = await pollOne(s)
+    assert.deepEqual(it.elements.map((x) => [x.ref, x.element.selector]), [['A', '#a'], ['B', '#b'], ['C', '#c']])
+  } finally { await s.stop() }
+})
+
+test('một phần tử gửi cả elements[] lẫn dạng cũ (overlay mới): bridge dùng elements, không nhân đôi', async () => {
+  let calls = 0
+  const s = await start({ fetchImpl: async (u, init) => { calls++; return fakeFetch(u, init) } })
+  try {
+    const one = { ref: 'A', note: 'riêng', ...elOf('#a', 'A') }
+    assert.equal((await s.post('/api/feedback', { note: 'chung', url: 'http://localhost:8091/', elements: [one], ...elOf('#a', 'A') })).status, 200)
+    const it = await pollOne(s)
+    assert.equal(calls, 1)
+    assert.equal(it.elements.length, 1)
+    assert.equal(it.elements[0].note, 'riêng')
+    assert.equal(it.element.selector, '#a')
+  } finally { await s.stop() }
+})
+
+test('nhiều phần tử: chỉ có ghi chú riêng vẫn gửi được; không ghi chú nào thì 400; tối đa 10, nhãn trùng/lạ được gán lại', async () => {
+  const s = await start()
+  try {
+    assert.equal((await s.post('/api/feedback', { note: '', url: 'http://localhost:8091/', elements: [elOf('#a'), elOf('#b')] })).status, 400)
+    assert.equal((await s.post('/api/feedback', { url: 'http://localhost:8091/', elements: [{ ...elOf('#a'), note: '   ' }] })).status, 400)
+    assert.equal((await s.post('/api/feedback', { url: 'http://localhost:8091/', elements: [{ ...elOf('#a'), note: 'to hơn' }, elOf('#b')] })).status, 200)
+    let it = await pollOne(s)
+    assert.equal(it.note, '')
+    assert.equal(it.elements[0].note, 'to hơn')
+    const many = Array.from({ length: 12 }, (_, i) => ({ ...elOf('#e' + i), ref: i === 1 ? 'A' : i === 2 ? 'zz' : 'ABCDEFGHIJKL'[i] }))
+    assert.equal((await s.post('/api/feedback', { note: 'nhiều', url: 'http://localhost:8091/', elements: many })).status, 200)
+    it = await pollOne(s)
+    assert.equal(it.elements.length, 10)
+    const refs = it.elements.map((x) => x.ref)
+    assert.equal(new Set(refs).size, 10)
+    assert.ok(refs.every((r) => /^[A-J]$/.test(r)))
+    assert.equal(refs[0], 'A')
+  } finally { await s.stop() }
+})
+
+test('gửi lại tin nhiều phần tử giữ nguyên elements', async () => {
+  const s = await start()
+  try {
+    const id = (await (await s.post('/api/feedback', { note: '[A] lệch [B]', url: 'http://localhost:8091/', elements: [{ ref: 'A', note: 'a', ...elOf('#a') }, { ref: 'B', ...elOf('#b') }] })).json()).id
+    await pollOne(s)
+    const j = await (await s.post('/api/feedback/resend', { id })).json()
+    const again = await pollOne(s)
+    assert.equal(again.id, j.id)
+    assert.equal(again.resentFrom, id)
+    assert.equal('element' in again, false)
+    assert.deepEqual(again.elements.map((x) => [x.ref, x.note, x.element.selector]), [['A', 'a', '#a'], ['B', null, '#b']])
+    const e = (await (await fetch(s.base + '/api/history', { headers: s.H })).json()).entries.filter((x) => x.role === 'user')
+    assert.deepEqual(e[1].elements, e[0].elements)
+  } finally { await s.stop() }
+})
+
 test('không phải Metro (Vite/Next): /symbolicate 404 thì tra source map, lần sau khỏi gọi /symbolicate', async () => {
   const calls = []
   const map = { version: 3, sources: ['Card.tsx'], names: [], mappings: 'AAAA;AAWM' } // dòng 2 cột 1 -> Card.tsx:12:7
@@ -305,7 +423,7 @@ test('không phải Metro (Vite/Next): /symbolicate 404 thì tra source map, l�
   }
   const s = await start({ fetchImpl })
   try {
-    const body = { note: 'n', url: 'http://localhost:5173/', components: ['Card'], stacks: [{ comp: 'Card', lines: ['at Card (http://localhost:5173/src/Card.tsx:2:1)'] }] }
+    const body = { note: 'n', url: 'http://localhost:5173/', element: { tag: 'DIV' }, components: ['Card'], stacks: [{ comp: 'Card', lines: ['at Card (http://localhost:5173/src/Card.tsx:2:1)'] }] }
     assert.equal((await s.post('/api/feedback', body)).status, 200)
     assert.equal((await s.post('/api/feedback', body)).status, 200)
     const got = await (await fetch(s.base + '/api/poll?ack=1&timeout=2000', { headers: s.H })).json()
@@ -319,7 +437,7 @@ test('React 18 _debugSource: không gọi /symbolicate, bỏ node_modules, giữ
   const paths = []
   const s = await start({ fetchImpl: async (u) => { paths.push(new URL(String(u)).pathname); throw new Error('no network') } })
   try {
-    const body = { note: 'n', url: 'http://localhost:5173/', stacks: STACK, debugSources: [
+    const body = { note: 'n', url: 'http://localhost:5173/', element: { tag: 'DIV' }, stacks: STACK, debugSources: [
       { comp: 'Button', file: 'F:\\app\\node_modules\\@mui\\Button.js', line: 1, column: 1 },
       { comp: 'Card', file: 'F:\\app\\src\\Card.tsx', line: 42, column: 9 },
       { comp: 'bad', file: 5, line: 'x' },
@@ -328,5 +446,17 @@ test('React 18 _debugSource: không gọi /symbolicate, bỏ node_modules, giữ
     const got = await (await fetch(s.base + '/api/poll?ack=1&timeout=2000', { headers: s.H })).json()
     assert.deepEqual(got.items[0].source.frames, [{ element: 'Card', createdIn: null, file: 'F:/app/src/Card.tsx', line: 42, column: 9 }])
     assert.deepEqual(paths, ['/@fs/F:/app/src/Card.tsx'])
+  } finally { await s.stop() }
+})
+
+test('nhiều phần tử: debugSources (React 18) đi theo từng phần tử', async () => {
+  const s = await start({ fetchImpl: async () => { throw new Error('no network') } })
+  try {
+    const el = (ref, file, line) => ({ ref, note: 'n' + ref, element: { tag: 'DIV' }, components: [], stacks: [], debugSources: [{ comp: 'C' + ref, file, line, column: 3 }] })
+    const body = { note: '', url: 'http://localhost:5173/', elements: [el('A', '/w/src/A.tsx', 10), el('B', '/w/src/B.tsx', 20)] }
+    assert.equal((await s.post('/api/feedback', body)).status, 200)
+    const got = await (await fetch(s.base + '/api/poll?ack=1&timeout=2000', { headers: s.H })).json()
+    const els = got.items[0].elements
+    assert.deepEqual(els.map((e) => [e.ref, e.source.frames[0].file, e.source.frames[0].line]), [['A', '/w/src/A.tsx', 10], ['B', '/w/src/B.tsx', 20]])
   } finally { await s.stop() }
 })

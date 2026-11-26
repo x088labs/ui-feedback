@@ -7,6 +7,8 @@ import os from 'node:os'
 import crypto from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import { createSourceMapResolver } from './sourcemap.mjs'
+import { createAllowList, pairKey, originToken, originSseKey } from './remote.mjs'
+import { parseImages, imageMeta, removeImages, sweepImages, imageDir, MAX_IMAGE_TOTAL, MAX_FEEDBACK_BODY } from './images.mjs'
 
 export const DEFAULT_PORT = 47831
 const HERE = path.dirname(fileURLToPath(import.meta.url))
@@ -16,6 +18,8 @@ export const VERSION = JSON.parse(fs.readFileSync(path.resolve(HERE, '../package
 export const LOOPBACK = new Set(['127.0.0.1', 'localhost', '[::1]', '::1'])
 const ORIGIN_OK = /^(https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?)$/
 const MAX_BODY = 256 * 1024
+// API mà trang ngoài localhost được gọi (bằng token riêng của origin đó).
+const REMOTE_ROUTES = new Set(['GET /api/history', 'POST /api/history/clear', 'POST /api/feedback', 'POST /api/feedback/resend', 'GET /api/events', 'GET /api/image'])
 
 export function stateDir() {
   return process.env.UIFB_HOME || path.join(os.homedir(), '.ui-feedback')
@@ -51,6 +55,9 @@ export const isLoopbackHost = (req) => LOOPBACK.has((req.headers.host || '').rep
 export const sseKey = (token) => crypto.createHmac('sha256', token).update('ui-feedback-sse').digest('hex').slice(0, 48)
 
 const norm = (file) => file.replace(/\\/g, '/')
+// Một tin gửi tối đa 10 phần tử, nhãn A–J (overlay gán theo thứ tự chọn).
+const REFS = 'ABCDEFGHIJ'.split('')
+const MAX_ELEMENTS = REFS.length
 
 // stacks: [{ comp, lines: ["at fn (url:line:col)", ...] }] lấy từ fiber._debugStack ở trình duyệt.
 export async function symbolicate(metroOrigin, stacks, fetchImpl = fetch) {
@@ -165,8 +172,9 @@ export const DEFAULT_ACK_MS = 60000
 // Sau `received`, agent phải trả lời trong ngần này ms, nếu không tin thành `expired` (UIFB_RECEIVED_MS, 0 = tắt).
 export const DEFAULT_RECEIVED_MS = 15 * 60000
 
-export function createBridge({ port = DEFAULT_PORT, dir = stateDir(), fetchImpl = fetch, ackMs = process.env.UIFB_ACK_MS != null ? +process.env.UIFB_ACK_MS : DEFAULT_ACK_MS, receivedMs = process.env.UIFB_RECEIVED_MS != null ? +process.env.UIFB_RECEIVED_MS : DEFAULT_RECEIVED_MS, permMinMs = 5000, remindMs = 60000, loopMs = 30 * 60000 } = {}) {
+export function createBridge({ port = DEFAULT_PORT, dir = stateDir(), fetchImpl = fetch, ackMs = process.env.UIFB_ACK_MS != null ? +process.env.UIFB_ACK_MS : DEFAULT_ACK_MS, receivedMs = process.env.UIFB_RECEIVED_MS != null ? +process.env.UIFB_RECEIVED_MS : DEFAULT_RECEIVED_MS, permMinMs = 5000, remindMs = 60000, loopMs = 30 * 60000, imgDir = imageDir(), imageTotal = MAX_IMAGE_TOTAL } = {}) {
   const token = loadOrCreateToken(dir)
+  const allow = createAllowList(dir) // origin ngoài localhost đã `tl-ui-feedback allow`
   const sourceMaps = createSourceMapResolver({ fetchImpl })
   // origin -> hết hạn (ms): đã biết không phải Metro, khỏi POST /symbolicate (Next sẽ render trang 404 mỗi lần).
   const notMetro = new Map()
@@ -188,11 +196,28 @@ export function createBridge({ port = DEFAULT_PORT, dir = stateDir(), fetchImpl 
   const queue = [] // {id,...}
   const items = new Map()
   const waiters = [] // {res, origin, timer}
-  const sse = new Set()
+  const sse = new Set() // res; res.uifbScope = origin ngoài localhost nếu luồng thuộc trang đó
   let seq = 0
 
+  // Luồng của origin ngoài localhost chỉ thấy sự kiện của chính nó: không thấy tin của site khác, tin agent không origin
+  // hay thẻ xin quyền (origin đó không bao giờ được duyệt quyền).
+  const scopedEvent = (obj, scope) => {
+    if (obj.type === 'presence') return scopedPresence(scope)
+    if (obj.type === 'message') return obj.entry?.origin === scope ? obj : null
+    if (obj.type === 'status' || obj.type === 'clear') return obj.origin === scope ? obj : null
+    return null
+  }
+  // Luồng của origin ngoài localhost chỉ sống khi origin còn được allow với đúng nonce lúc mở luồng: `allow --remove`,
+  // hết hạn hay allow lại với nonce mới đều cắt luồng đang mở (allow chỉ được kiểm khi request tới).
+  const scopeLive = (r) => { const e = allow.get(r.uifbScope); return !!e && (e.nonce || '') === r.uifbNonce }
   const sendEvent = (obj) => {
-    for (const r of sse) r.write(`data: ${JSON.stringify(obj)}\n\n`)
+    const all = `data: ${JSON.stringify(obj)}\n\n`
+    for (const r of sse) {
+      if (!r.uifbScope) { r.write(all); continue }
+      if (!scopeLive(r)) { sse.delete(r); r.end(); continue }
+      const v = scopedEvent(obj, r.uifbScope)
+      if (v) r.write(`data: ${JSON.stringify(v)}\n\n`)
+    }
   }
   // Presence theo origin: waiter không lọc origin nghe mọi site; waiter có origin chỉ nghe site đó.
   const listeningFor = (o) => waiters.some((w) => !w.origin || w.origin === o)
@@ -202,8 +227,35 @@ export function createBridge({ port = DEFAULT_PORT, dir = stateDir(), fetchImpl 
     any: waiters.some((w) => !w.origin),
     origins: [...new Set(waiters.filter((w) => w.origin).map((w) => w.origin))],
   })
+  const scopedPresence = (o) => {
+    const on = listeningFor(o)
+    return { type: 'presence', listening: on, any: false, origins: on ? [o] : [] }
+  }
   const presence = () => sendEvent(presenceState())
 
+  // Bỏ một tin khỏi bộ nhớ, kèm file ảnh tạm CLI đã ghi cho nó.
+  const dropItem = (id) => {
+    const it = items.get(id)
+    items.delete(id)
+    if (it?.images?.length) removeImages(id, imgDir)
+  }
+  // Tổng dung lượng ảnh đang giữ. Vượt trần: bỏ ảnh của tin đã trả lời trước, rồi mới tới tin `expired`
+  // (agent có thể vẫn đang làm: tin tiến độ cứu nó về `received`); trong mỗi lượt cũ trước (Map giữ thứ tự thêm vào).
+  const imageBytes = () => { let n = 0; for (const it of items.values()) for (const g of it.images || []) n += g.data ? g.bytes : 0; return n }
+  const makeRoomForImages = (need) => {
+    let used = imageBytes()
+    for (const status of ['replied', 'expired']) {
+      for (const it of items.values()) {
+        if (used + need <= imageTotal) return true
+        if (it.status !== status || !it.images?.some((g) => g.data)) continue
+        for (const g of it.images) { used -= g.data ? g.bytes : 0; delete g.data }
+        removeImages(it.id, imgDir)
+        const e = thread.find((x) => x.itemId === it.id)
+        if (e?.images) e.imagesEvicted = true
+      }
+    }
+    return used + need <= imageTotal
+  }
   // Lịch sử hội thoại (chỉ trong bộ nhớ, không ghi đĩa): yêu cầu của người dùng + phản hồi của agent.
   const thread = []
   const MAX_THREAD = 500
@@ -213,7 +265,7 @@ export function createBridge({ port = DEFAULT_PORT, dir = stateDir(), fetchImpl 
       // Tin cũ rơi khỏi lịch sử: bỏ luôn item đã có kết cục, nếu không `items` lớn mãi trong phiên bridge dài.
       const old = thread.shift()
       const it = old.role === 'user' && items.get(old.itemId)
-      if (it && (it.status === 'replied' || it.status === 'expired')) items.delete(it.id)
+      if (it && (it.status === 'replied' || it.status === 'expired')) dropItem(it.id)
     }
     sendEvent({ type: 'message', entry: e })
   }
@@ -285,6 +337,7 @@ export function createBridge({ port = DEFAULT_PORT, dir = stateDir(), fetchImpl 
     const c = normPath(cwd)
     const a = +agent || 0
     const match = (who) => { const pa = agentOf(who); return a && pa ? a === pa : sameSession(c, cwdOf(who)) }
+    // Chỉ origin localhost: trang ngoài localhost không bao giờ nhận thẻ xin quyền (agent hỏi ở terminal).
     return [...new Set([
       ...[...items.values()]
         .filter((i) => i.origin && (i.status === 'delivered' || i.status === 'received') && match(i.deliveredTo?.who || i.receivedBy))
@@ -292,7 +345,7 @@ export function createBridge({ port = DEFAULT_PORT, dir = stateDir(), fetchImpl 
       // Vòng lặp chỉ khớp theo PID agent (cả hai bên phải có): so cwd quá lỏng cho cửa sổ 30 phút, một phiên khác cùng dự án
       // sẽ nhận thẻ và người dùng dễ duyệt nhầm lệnh của nó.
       ...liveLoops().filter((l) => { const pa = agentOf(l.who); return a && pa && a === pa }).map((l) => l.origin),
-    ])]
+    ])].filter((o) => ORIGIN_OK.test(o))
   }
   // Tin agent đã nhận nhưng chưa trả lời, mà CHÍNH phiên đó đã quay lại poll: agent quên reply (thường gặp với câu hỏi,
   // agent trả lời trong terminal). Poll trả ngay một lời nhắc (mỗi tin một lần), nếu không trang hiện "đang làm" tới khi hết hạn.
@@ -353,7 +406,7 @@ export function createBridge({ port = DEFAULT_PORT, dir = stateDir(), fetchImpl 
 
   function cors(req, res) {
     const o = req.headers.origin
-    if (o && ORIGIN_OK.test(o)) {
+    if (o && (ORIGIN_OK.test(o) || allow.has(o))) {
       res.setHeader('Access-Control-Allow-Origin', o)
       res.setHeader('Vary', 'Origin')
       res.setHeader('Access-Control-Allow-Headers', 'authorization, content-type')
@@ -365,13 +418,13 @@ export function createBridge({ port = DEFAULT_PORT, dir = stateDir(), fetchImpl 
     res.writeHead(code, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
     res.end(JSON.stringify(obj))
   }
-  const readBody = (req) =>
+  const readBody = (req, max = MAX_BODY) =>
     new Promise((resolve, reject) => {
       let n = 0
       const chunks = []
       req.on('data', (c) => {
         n += c.length
-        if (n > MAX_BODY) {
+        if (n > max) {
           reject(Object.assign(new Error('body too large'), { status: 413 }))
           req.destroy()
         } else chunks.push(c)
@@ -399,14 +452,20 @@ export function createBridge({ port = DEFAULT_PORT, dir = stateDir(), fetchImpl 
   }
   const newId = () => 'fb_' + String(++seq).padStart(2, '0') + '_' + crypto.randomBytes(3).toString('hex')
   // Mục chat của người dùng cho một item (dùng chung cho gửi mới và gửi lại).
+  const chipOf = (element, source) => {
+    const el = element || {}
+    const comps = source?.components || []
+    const top = (source?.frames || []).find((f) => f.file)
+    return el.tag ? { label: comps.slice(0, 3).join(' › ') || String(el.tag).toLowerCase(), file: top ? `${top.file}:${top.line}` : null } : null
+  }
   const entryFor = (item) => {
-    const el = item.element || {}
-    const comps = item.source?.components || []
-    const top = (item.source?.frames || []).find((f) => f.file)
-    return {
+    const e = {
       id: item.id, ts: item.createdAt, role: 'user', text: item.note, itemId: item.id, status: 'queued', origin: item.origin,
-      element: el.tag ? { label: comps.slice(0, 3).join(' › ') || String(el.tag).toLowerCase(), file: top ? `${top.file}:${top.line}` : null } : null,
+      element: chipOf(item.element, item.source),
     }
+    if (item.elements?.length) e.elements = item.elements.map((x) => ({ ref: x.ref, note: x.note, ...chipOf(x.element, x.source) }))
+    if (item.images?.length) e.images = imageMeta(item.images)
+    return e
   }
   const enqueue = (item) => {
     items.set(item.id, item)
@@ -473,7 +532,11 @@ export function createBridge({ port = DEFAULT_PORT, dir = stateDir(), fetchImpl 
     try {
       if (!isLoopbackHost(req)) return json(res, 403, { error: 'bad host' })
       const origin = req.headers.origin
-      if (origin && !ORIGIN_OK.test(origin)) return json(res, 403, { error: 'origin not allowed' })
+      // remote: trang ngoài localhost đã được `allow`. Chỉ dùng token riêng của origin đó, chỉ các API của trang, chỉ dữ liệu của nó.
+      const remoteEntry = origin && !ORIGIN_OK.test(origin) ? allow.get(origin) : null
+      const remote = remoteEntry ? origin : null
+      const nonce = remoteEntry?.nonce || ''
+      if (origin && !ORIGIN_OK.test(origin) && !remote) return json(res, 403, { error: 'origin not allowed' })
       cors(req, res)
       if (req.method === 'OPTIONS') {
         res.writeHead(204)
@@ -490,10 +553,24 @@ export function createBridge({ port = DEFAULT_PORT, dir = stateDir(), fetchImpl 
       if (req.method === 'GET' && p === '/api/handshake') {
         // Token chỉ cho trang loopback (có header Origin do trình duyệt đặt).
         if (!origin) return json(res, 403, { error: 'browser origin required' })
-        return json(res, 200, { token, sse: sse_key, listening: listeningFor(origin) })
+        if (remote) {
+          // Khóa ghép cặp chỉ có trong bookmarklet do `tl-ui-feedback allow` in ra: script khác của site không tự lấy được token.
+          if (!same(url.searchParams.get('key'), pairKey(token, remote, nonce))) return json(res, 403, { error: 'pairing key required', pair: true })
+          return json(res, 200, { token: originToken(token, remote, nonce), sse: originSseKey(token, remote, nonce), listening: listeningFor(remote), scoped: true, images: true })
+        }
+        // images: overlay chỉ gửi ảnh khi bridge báo hỗ trợ (bridge cũ còn chạy nền sẽ bỏ qua ảnh hoặc trả 413).
+        return json(res, 200, { token, sse: sse_key, listening: listeningFor(origin), images: true })
       }
       if (!p.startsWith('/api/')) return json(res, 404, { error: 'not found' })
-      if (!authed(req, url)) return json(res, 401, { error: 'unauthorized' })
+      let scope = null
+      if (remote) {
+        const h = req.headers.authorization || ''
+        const ok = (h.startsWith('Bearer ') && same(h.slice(7), originToken(token, remote, nonce))) ||
+          (p === '/api/events' && req.method === 'GET' && same(url.searchParams.get('sse'), originSseKey(token, remote, nonce)))
+        if (!ok) return json(res, 401, { error: 'unauthorized' })
+        if (!REMOTE_ROUTES.has(req.method + ' ' + p)) return json(res, 403, { error: 'not allowed for this origin' })
+        scope = remote
+      } else if (!authed(req, url)) return json(res, 401, { error: 'unauthorized' })
 
       if (req.method === 'GET' && p === '/api/status') return json(res, 200, {
         queued: queue.length,
@@ -503,19 +580,20 @@ export function createBridge({ port = DEFAULT_PORT, dir = stateDir(), fetchImpl 
       })
 
       if (req.method === 'GET' && p === '/api/history') {
+        if (scope) return json(res, 200, { permissions: [], entries: thread.filter((e) => e.origin === scope), listening: listeningFor(scope) })
         const o = url.searchParams.get('origin') || ''
         return json(res, 200, { permissions: pendingPerms(o), entries: thread.filter((e) => !o || e.origin === o || e.origin === ''), listening: o ? listeningFor(o) : waiters.length > 0 })
       }
 
       // Xóa lịch sử hội thoại của một origin (chỉ phần hiển thị; tin đang chờ giao vẫn được giao).
       if (req.method === 'POST' && p === '/api/history/clear') {
-        const o = url.searchParams.get('origin') || ''
+        const o = scope || url.searchParams.get('origin') || ''
         let removed = 0
         for (let i = thread.length - 1; i >= 0; i--) {
           if (!o || thread[i].origin === o) { thread.splice(i, 1); removed++ } // tin origin '' dùng chung cho mọi site: không xóa khi chỉ xóa một site
         }
         // Dọn các tin đã xong của origin này khỏi bộ nhớ (tin đang chờ/đang xử lý giữ lại).
-        for (const [id, it] of items) if ((!o || it.origin === o) && (it.status === 'replied' || it.status === 'expired')) items.delete(id)
+        for (const [id, it] of items) if ((!o || it.origin === o) && (it.status === 'replied' || it.status === 'expired')) dropItem(id)
         sendEvent({ type: 'clear', origin: o })
         return json(res, 200, { cleared: removed })
       }
@@ -567,36 +645,95 @@ export function createBridge({ port = DEFAULT_PORT, dir = stateDir(), fetchImpl 
       if (req.method === 'POST' && p === '/api/feedback/resend') {
         const b = await readBody(req)
         const old = typeof b.id === 'string' ? items.get(b.id) : null
-        if (!old) return json(res, 404, { error: 'item not found' })
+        if (!old || (scope && old.origin !== scope)) return json(res, 404, { error: 'item not found' })
         // Chỉ sao chép phần nội dung; không mang theo trạng thái giao/nhận (deliveredTo, receivedBy, unacked...) của tin cũ.
-        return json(res, 200, enqueue({
+        const copy = {
           id: newId(), createdAt: new Date().toISOString(), status: 'queued',
-          url: old.url, origin: old.origin, viewport: old.viewport, note: old.note, lang: old.lang ?? null, element: old.element, source: old.source,
-          resentFrom: old.id,
-        }))
+          url: old.url, origin: old.origin, viewport: old.viewport, note: old.note, lang: old.lang ?? null,
+        }
+        if ('element' in old) { copy.element = old.element; copy.source = old.source }
+        if (old.elements) copy.elements = old.elements
+        if (old.images?.length) {
+          if (old.images.some((g) => !g.data)) return json(res, 410, { error: 'images of this message were dropped from memory' })
+          // Sao chép TRƯỚC khi dọn chỗ: tin gốc (đã trả lời) có thể chính là tin bị bỏ ảnh, bản sao vẫn giữ dữ liệu.
+          const imgs = old.images.map((g) => ({ ...g }))
+          if (!makeRoomForImages(imgs.reduce((n, g) => n + g.bytes, 0))) return json(res, 413, { error: 'image memory full; wait for the agent to answer pending messages' })
+          copy.images = imgs
+        }
+        copy.resentFrom = old.id
+        return json(res, 200, enqueue(copy))
       }
       if (req.method === 'POST' && p === '/api/feedback') {
-        const b = await readBody(req)
-        if (!b.note || typeof b.note !== 'string') return json(res, 400, { error: 'note required' })
+        const b = await readBody(req, MAX_FEEDBACK_BODY)
+        const images = parseImages(b.images)
+        if (b.note != null && typeof b.note !== 'string') return json(res, 400, { error: 'note required' })
         let pageOrigin = origin || ''
         if (b.url) {
           try { pageOrigin = new URL(String(b.url)).origin } catch { return json(res, 400, { error: 'invalid url' }) }
         }
-        let frames = []
-        try {
-          frames = await resolveSource(b.metroOrigin || pageOrigin, b.stacks, b.debugSources)
-        } catch (e) {
-          frames = [{ error: e.message }]
+        if (scope && pageOrigin !== scope) return json(res, 400, { error: 'url must be on ' + scope })
+        // Trang ngoài localhost: không tra file:dòng (Metro, source map; bản deploy không có, và trang không được chọn cổng local để bridge gọi).
+        const metro = scope ? null : b.metroOrigin || pageOrigin
+        const sourceOf = async (components, stacks, debugSources) => {
+          let frames = []
+          if (metro) {
+            try {
+              frames = await resolveSource(metro, stacks, debugSources)
+            } catch (e) {
+              frames = [{ error: e.message }]
+            }
+          }
+          return { components: Array.isArray(components) ? components.slice(0, 16) : [], frames }
         }
-        const el = b.element || {}
-        return json(res, 200, enqueue({
+        const pickEl = (el = {}) => ({ tag: el.tag, testID: el.testID ?? null, text: el.text, selector: el.selector, rect: el.rect, style: el.style })
+        // Nhiều phần tử (overlay mới): elements[] mỗi phần tử có nhãn A–J và ghi chú riêng. Overlay cũ gửi element/components/stacks đơn.
+        let elements = []
+        if (Array.isArray(b.elements)) {
+          const used = new Set()
+          const list = []
+          for (const [i, x] of b.elements.slice(0, MAX_ELEMENTS).entries()) {
+            if (!x || typeof x !== 'object' || !x.element) continue
+            let ref = typeof x.ref === 'string' && /^[A-J]$/.test(x.ref) && !used.has(x.ref) ? x.ref : null
+            if (!ref) ref = REFS.find((r) => !used.has(r)) || String(i + 1)
+            used.add(ref)
+            const note = typeof x.note === 'string' && x.note.trim() ? x.note.trim().slice(0, 1000) : null
+            list.push({ ref, note, x })
+          }
+          // Symbolicate song song: mỗi lần có timeout 5 s, chạy nối tiếp thì Metro treo làm 10 phần tử chờ ~50 s.
+          const sources = await Promise.all(list.map(({ x }) => sourceOf(x.components, x.stacks, x.debugSources)))
+          elements = list.map(({ ref, note, x }, i) => ({ ref, note, element: pickEl(x.element), source: sources[i] }))
+        } else if (b.element) {
+          elements = [{ ref: 'A', note: null, element: pickEl(b.element), source: await sourceOf(b.components, b.stacks, b.debugSources) }]
+        }
+        const note = typeof b.note === 'string' ? b.note.slice(0, 4000) : ''
+        if (!note.trim() && !elements.some((x) => x.note) && !images.length) return json(res, 400, { error: 'note required' })
+        if (images.length && !makeRoomForImages(images.reduce((n, g) => n + g.bytes, 0))) return json(res, 413, { error: 'image memory full; wait for the agent to answer pending messages' })
+        const item = {
           id: newId(), createdAt: new Date().toISOString(), status: 'queued',
-          url: b.url || null, origin: pageOrigin, viewport: b.viewport || null, note: b.note.slice(0, 4000),
+          url: b.url || null, origin: pageOrigin, viewport: b.viewport || null, note,
           // Ngôn ngữ giao diện overlay (vi|en): gợi ý cho agent trả lời đúng ngôn ngữ khi ghi chú quá ngắn để đoán.
           lang: b.lang === 'vi' || b.lang === 'en' ? b.lang : null,
-          element: { tag: el.tag, testID: el.testID ?? null, text: el.text, selector: el.selector, rect: el.rect, style: el.style },
-          source: { components: Array.isArray(b.components) ? b.components.slice(0, 16) : [], frames },
-        }))
+        }
+        // 0 hoặc 1 phần tử: giữ element/source top-level như bản cũ (agent/MCP cũ vẫn đọc được).
+        // Từ 2 phần tử: bỏ top-level để agent cũ không lặng lẽ bỏ qua B, C…
+        if (elements.length <= 1) {
+          item.element = elements[0]?.element || pickEl()
+          item.source = elements[0]?.source || { components: [], frames: [] }
+        }
+        item.elements = elements
+        if (images.length) item.images = images
+        return json(res, 200, enqueue(item))
+      }
+
+      // Ảnh của một tin (overlay hiện lại thumbnail sau khi tải lại trang).
+      if (req.method === 'GET' && p === '/api/image') {
+        const it = items.get(url.searchParams.get('id') || '')
+        if (!it || (scope && it.origin !== scope)) return json(res, 404, { error: 'item not found' })
+        const g = (it.images || []).find((x) => x.n === +url.searchParams.get('n'))
+        if (!g) return json(res, 404, { error: 'image not found' })
+        if (!g.data) return json(res, 410, { error: 'image dropped from memory' })
+        res.writeHead(200, { 'content-type': g.mime, 'cache-control': 'private, max-age=3600', 'x-content-type-options': 'nosniff' })
+        return res.end(Buffer.from(g.data, 'base64'))
       }
 
       if (req.method === 'GET' && p === '/api/poll') {
@@ -612,7 +749,7 @@ export function createBridge({ port = DEFAULT_PORT, dir = stateDir(), fetchImpl 
         const un = url.searchParams.get('remind') === '1' ? unansweredFor(who, originFilter) : []
         if (un.length) {
           un.forEach(remind)
-          return json(res, 200, { status: 'unanswered', count: 0, items: [], unanswered: un.map((i) => ({ id: i.id, url: i.url, origin: i.origin, note: i.note, lang: i.lang ?? null, createdAt: i.createdAt })) })
+          return json(res, 200, { status: 'unanswered', count: 0, items: [], unanswered: un.map((i) => ({ id: i.id, url: i.url, origin: i.origin, note: i.note, lang: i.lang ?? null, createdAt: i.createdAt, images: i.images?.length || 0 })) })
         }
         const w = { res, origin: originFilter, who, canAck, since: new Date().toISOString() }
         w.timer = setTimeout(() => {
@@ -675,7 +812,7 @@ export function createBridge({ port = DEFAULT_PORT, dir = stateDir(), fetchImpl 
           if (qi >= 0) queue.splice(qi, 1)
         }
         // Có id: theo origin của yêu cầu. Không id: theo origin agent khai báo (hợp lệ mới nhận), nếu không thì phát cho mọi site.
-        const replyOrigin = it ? it.origin : typeof b.origin === 'string' && ORIGIN_OK.test(b.origin) ? b.origin : ''
+        const replyOrigin = it ? it.origin : typeof b.origin === 'string' && (ORIGIN_OK.test(b.origin) || allow.has(b.origin)) ? b.origin : ''
         touchLoop(String(b.who || '').slice(0, 200), replyOrigin)
         // Tin tiến độ (không id) cho thấy agent còn sống: gia hạn hẹn giờ `received` của các tin cùng origin, và cứu tin đã `expired` nhầm.
         if (!it) {
@@ -692,12 +829,18 @@ export function createBridge({ port = DEFAULT_PORT, dir = stateDir(), fetchImpl 
 
       if (req.method === 'GET' && p === '/api/events') {
         res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-store', connection: 'keep-alive' })
-        res.write(`data: ${JSON.stringify(presenceState())}\n\n`)
+        res.uifbScope = scope
+        res.uifbNonce = nonce
+        res.write(`data: ${JSON.stringify(scope ? scopedPresence(scope) : presenceState())}\n\n`)
         sse.add(res)
         // Origin của trang mở luồng (trình duyệt luôn gửi với EventSource khác origin): biết trang nào đang mở để hiện thẻ xin quyền.
-        const po = origin && ORIGIN_OK.test(origin) ? origin : ''
+        const po = !scope && origin && ORIGIN_OK.test(origin) ? origin : ''
         if (po) pages.set(po, (pages.get(po) || 0) + 1)
-        const hb = setInterval(() => res.write(': hb\n\n'), 15000)
+        // Heartbeat cũng kiểm lại allow, để luồng site im lặng vẫn bị cắt khi site bị gỡ/hết hạn.
+        const hb = setInterval(() => {
+          if (scope && !scopeLive(res)) { sse.delete(res); res.end(); return }
+          res.write(': hb\n\n')
+        }, 15000)
         res.on('close', () => {
           sse.delete(res)
           clearInterval(hb)
@@ -739,6 +882,7 @@ export function createBridge({ port = DEFAULT_PORT, dir = stateDir(), fetchImpl 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const port = +process.env.UIFB_PORT || DEFAULT_PORT
   const b = createBridge({ port })
+  sweepImages(3600000) // ảnh tạm của phiên bridge trước: tin đã không còn trong bộ nhớ
   b.listen()
     .then((p) => {
       fs.writeFileSync(path.join(stateDir(), 'server.json'), JSON.stringify({ port: p, pid: process.pid }))

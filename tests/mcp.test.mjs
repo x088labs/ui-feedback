@@ -9,7 +9,7 @@ import { spawn } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { createBridge } from '../bridge/server.mjs'
 
-const MCP = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'mcp', 'server.mjs')
+const MCP = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../mcp/server.mjs')
 const ORIGIN = 'http://localhost:8091'
 
 async function setup(opts = {}) {
@@ -101,7 +101,9 @@ test('MCP: client đóng stdin thì server thoát (không để poll mồ côi n
     await new Promise((r) => setTimeout(r, 300))
     const exited = new Promise((r) => s.child.once('exit', (code) => r(code)))
     s.child.stdin.end()
-    const code = await Promise.race([exited, new Promise((r) => setTimeout(() => r('timeout'), 5000))])
+    let timer
+    const code = await Promise.race([exited, new Promise((r) => { timer = setTimeout(() => r('timeout'), 5000) })])
+    clearTimeout(timer) // không huỷ thì timer giữ tiến trình test sống thêm ~5 s sau khi test xong
     assert.equal(code, 0)
   } finally { await s.stop() }
 })

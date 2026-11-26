@@ -208,8 +208,35 @@ export function probe(url, timeoutMs = 1500) {
   })
 }
 
+// Windows: khi có biến NoDefaultCurrentDirectoryInExePath (Claude Code đặt sẵn), cmd.exe không tìm lệnh trong thư mục
+// hiện tại, nên `start-web.cmd ...` báo "is not recognized" dù file nằm ngay trong cwd. Nếu từ đầu tiên là tên trần
+// (không có / hay \) của một file chạy được trong cwd thì thêm `.\`. Đuôi thử theo thứ tự PATHEXT mặc định
+// (.COM;.EXE;.BAT;.CMD); lệnh có sẵn của cmd (echo, set, start...) luôn thắng file trên đĩa nên để nguyên.
+// Chỉ xử lý từ đầu tiên: `cd sub && run.cmd` hay `set X=1 && run.cmd` vẫn phải ghi `.\run.cmd`.
+const WIN_EXTS = ['.com', '.exe', '.bat', '.cmd']
+const CMD_BUILTINS = new Set(['assoc', 'break', 'call', 'cd', 'chdir', 'cls', 'color', 'copy', 'date', 'del', 'dir', 'echo', 'endlocal', 'erase', 'exit', 'for', 'ftype', 'goto', 'if', 'md', 'mkdir', 'mklink', 'move', 'path', 'pause', 'popd', 'prompt', 'pushd', 'rd', 'rem', 'ren', 'rename', 'rmdir', 'set', 'setlocal', 'shift', 'start', 'time', 'title', 'type', 'ver', 'verify', 'vol'])
+export function resolveLocalCommand(command, cwd, platform = process.platform, isFile = (f) => { try { return fs.statSync(f).isFile() } catch { return false } }, env = process.env) {
+  if (platform !== 'win32') return command
+  const m = /^\s*(?:"([^"]+)"|(\S+))/.exec(command)
+  if (!m) return command
+  const name = m[1] ?? m[2]
+  if (/[\\/:]/.test(name) || CMD_BUILTINS.has(name.toLowerCase())) return command
+  const ext = path.extname(name).toLowerCase()
+  const candidates = WIN_EXTS.includes(ext) ? [name] : WIN_EXTS.map((e) => name + e)
+  const hit = candidates.find((c) => isFile(path.win32.join(cwd, c)))
+  if (!hit) return command
+  // Có trên PATH thì để cmd.exe tự tìm: không để file nằm trong repo (vd npm.cmd) chiếm chỗ lệnh thật — đó là lý do
+  // NoDefaultCurrentDirectoryInExePath tồn tại. Chỉ thêm `.\` khi lệnh không thì chắc chắn "is not recognized".
+  const dirs = String(env.PATH ?? env.Path ?? '').split(';').filter(Boolean)
+  if (dirs.some((d) => candidates.some((c) => isFile(path.win32.join(d, c))))) return command
+  const lead = /^\s*/.exec(command)[0]
+  const local = `.\\${hit}`
+  return lead + (/\s/.test(local) ? `"${local}"` : local) + command.slice(m[0].length)
+}
+
 export async function runDevCommand({ command, cwd = process.cwd(), upstream, timeoutMs = 60000, log = (l) => process.stderr.write(l) }) {
   if (await probe(upstream)) throw new Error(L(`đã có server trả lời ở ${upstream}; bỏ --cmd hoặc dừng server đó trước`, `a server already answers at ${upstream}; drop --cmd or stop that server first`))
+  command = resolveLocalCommand(command, cwd)
   const child = spawn(command, { shell: true, cwd, detached: process.platform !== 'win32', stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true })
   child.stdout.on('data', log)
   child.stderr.on('data', log)

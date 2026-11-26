@@ -30,3 +30,18 @@ test('reply - mà stdin là terminal thì báo lỗi rõ ràng thay vì treo', (
   assert.notEqual(r.status, 0)
   assert.match(r.stderr + r.stdout, /rỗng/)
 })
+
+test('formatItem: nhiều phần tử in từng khối theo nhãn; một phần tử giữ định dạng cũ', () => {
+  const el = (sel) => ({ element: { tag: 'BUTTON', text: 'x', selector: sel }, source: { components: ['Save'], frames: [{ element: 'Save', file: 'src/Save.tsx', line: 3, column: 1 }] } })
+  const single = { id: 'fb_1', note: 'sai', element: el('#a').element, source: el('#a').source }
+  const out1 = formatItem({ ...single, elements: [{ ref: 'A', note: null, ...el('#a') }] })
+  assert.equal(out1, formatItem(single))
+  assert.doesNotMatch(out1, /\[A\]/)
+  const out = formatItem({ id: 'fb_2', note: 'bấm [A] mà [B] không reload', elements: [{ ref: 'A', note: 'nút lưu', ...el('#save') }, { ref: 'B', note: null, ...el('#table') }] })
+  assert.match(out, /^elements: 2 picked/m)
+  assert.match(out, /^## \[A\] note: nút lưu$/m)
+  assert.match(out, /^## \[B\]$/m)
+  assert.match(out, /^ {2}selector: #save$/m)
+  assert.match(out, /^ {2}selector: #table$/m)
+  assert.match(out, /src\/Save\.tsx:3:1/)
+})
