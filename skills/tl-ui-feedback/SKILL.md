@@ -20,7 +20,7 @@ Arguments are a **site** (dev server port, URL, or HTML folder/file) and an opti
 | `/tl-ui-feedback serve ...` (other forms) | pass through verbatim |
 | `/tl-ui-feedback` (no arguments) | `tl-ui-feedback serve --list`; reuse your own serve, otherwise ask for the site |
 | A prompt saying the page `<origin>` is already open (copied from the page's "Connect agent" button) | nothing: skip steps 1–4, set `ORIGIN = <origin>`, start the loop; on stop, do not stop any serve |
-| `/tl-ui-feedback https://<deployed site>` (not localhost: staging, QA) | do not `serve` it. Run `tl-ui-feedback allow <site>` and show the user its output verbatim (the bookmarklet line in full): save it as a bookmark, open the site, click it, allow local network access if Chrome asks. Then set `ORIGIN = <site origin>` and start the loop. The page sends no source file:line; permission prompts stay in the terminal. After the site was removed or expired, `allow` issues a new key: the user must replace the old bookmark with the new bookmarklet |
+| `/tl-ui-feedback https://<deployed site>` (not localhost: staging, QA) | nothing: tell the user only local dev servers (localhost) are supported for now |
 
 Steps:
 1. Run `tl-ui-feedback serve --list`. Reuse a serve only if THIS session started it, then skip step 2. Never touch or stop another session's serve: each agent is bound to one site.

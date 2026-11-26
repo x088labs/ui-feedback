@@ -63,7 +63,7 @@
     '.fab:hover,.fab.on{opacity:1}.fab.on{background:#f9f6e7;color:#1d2433;border-color:#f9f6e7}' +
     '.badge{display:none;min-width:18px;height:18px;padding:0 5px;border-radius:9px;background:#b3261e;color:#fff;font-size:11px;line-height:18px;text-align:center}' +
     '.dot{width:8px;height:8px;border-radius:50%;background:#9aa3b5}.dot.live{background:#22a06b}.dot.work{background:#e0a100;animation:pulse 1.2s ease-in-out infinite}' +
-    '@keyframes spin{to{transform:rotate(360deg)}}@keyframes pulse{0%,100%{opacity:.35}50%{opacity:1}}@keyframes bounce{0%,80%,100%{opacity:.3;transform:translateY(0)}40%{opacity:1;transform:translateY(-3px)}}' +
+    '@keyframes pulse{0%,100%{opacity:.35}50%{opacity:1}}@keyframes bounce{0%,80%,100%{opacity:.3;transform:translateY(0)}40%{opacity:1;transform:translateY(-3px)}}' +
     '.typing{align-self:flex-start;display:flex;align-items:center;gap:8px;background:#eef1f7;border-radius:10px;border-bottom-left-radius:3px;padding:8px 12px;color:#5d6678;white-space:nowrap;max-width:100%}' +
     '.typing .d{width:6px;height:6px;border-radius:50%;background:#8a93a6;animation:bounce 1.2s infinite}.typing .d:nth-child(2){animation-delay:.15s}.typing .d:nth-child(3){animation-delay:.3s}' +
     '@media (prefers-reduced-motion:reduce){.dot.work,.typing .d{animation:none;opacity:1}}' +
@@ -76,7 +76,7 @@
     '.rzw{display:none;position:absolute;left:0;top:0;bottom:0;width:6px;cursor:ew-resize;z-index:2;touch-action:none}.chat.pin .rzw{display:block}.rzw:hover,.rzw.on{background:#f9f6e799}' +
     '.hd{display:flex;align-items:center;gap:8px;padding:9px 10px;border-bottom:1px solid #e3e6ee;background:#f6f7fa;white-space:nowrap}' +
     '.hd .lr{flex:none;display:flex;align-items:center;border:1px solid #c9ced8;background:#fff;color:#1d2433;border-radius:6px;padding:4px 6px;cursor:pointer;line-height:0}.hd .lr[hidden]{display:none}.hd .lr input{position:absolute;opacity:0;width:0;height:0;margin:0}.hd .lr svg{display:block;pointer-events:none}.hd .lr.on{background:#f9f6e7;border-color:#ecd58a}' +
-    '.hd .t{font-weight:600;flex:none}.hd .pres{font-size:11px;color:#5d6678;margin-right:auto;display:flex;align-items:center;gap:5px;min-width:0}.hd .ptxt{overflow:hidden;text-overflow:ellipsis;min-width:0}.hd .ptxt[hidden]{display:none}.hd .pic{display:flex;line-height:0}.hd .pic[hidden],.hd .dot[hidden]{display:none}.hd .pic.live{color:#22a06b}.hd .pic.work{color:#e0a100}.hd .pic .spin{animation:spin 1s linear infinite}.hd button{flex:none}' +
+    '.hd .t{font-weight:600;flex:none}.hd .pres{font-size:11px;color:#5d6678;margin-right:auto;display:flex;align-items:center;gap:5px;min-width:0}.hd .ptxt{overflow:hidden;text-overflow:ellipsis;min-width:0}.hd .ptxt[hidden]{display:none}.hd .pic{display:flex;line-height:0}.hd .pic[hidden],.hd .dot[hidden]{display:none}.hd .pic.live{color:#22a06b}.hd .pic.work{color:#e0a100}.hd .pic .busy{animation:pulse 1.2s ease-in-out infinite}.hd button{flex:none}' +
     '.stale{position:relative;margin:4px 0 8px;padding:8px 26px 8px 10px;border:1px solid #ecd58a;background:#fdf9ea;border-radius:8px;font-size:12px;color:#5d4a00;display:flex;flex-direction:column;gap:6px;align-items:flex-start}' +
     '.stale button.x{position:absolute;top:4px;right:4px;border:0;background:none;color:#8a7420;font-size:15px;line-height:1;padding:2px 5px;border-radius:4px;cursor:pointer}.stale button.x:hover{background:#f3e8bd;color:#5d4a00}' +
     '.hd button.cp{font-size:11px;padding:1px 7px;border-color:#22a06b;color:#1a7f52}.hd button.cp:hover{background:#e7f6ef}.hd button.cp[hidden]{display:none}' +
@@ -229,11 +229,11 @@
     var s = staleItem(), k = s ? s.min : -1
     if (k !== staleKey) { staleKey = k; if (open) render() } // chỉ vẽ lại khi vào/ra trạng thái kẹt hoặc số phút đổi
   }, Math.min(30000, Math.max(500, STALE_MS / 2)))
-  // Icon trạng thái agent ở header (lucide): tai = đang nghe, vòng xoay = đang làm, bàn tay = chờ cho phép.
+  // Icon trạng thái agent ở header (lucide): tai = đang nghe, robot nhấp nháy = đang làm, bàn tay = chờ cho phép.
   var PIC_SVG = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"'
   var PIC = {
     live: PIC_SVG + '><path d="M6 8.5a6.5 6.5 0 1 1 13 0c0 6-6 6-6 10a3.5 3.5 0 1 1-7 0"/><path d="M15 8.5a2.5 2.5 0 0 0-5 0v1a2 2 0 1 1 0 4"/></svg>',
-    work: PIC_SVG + ' class="spin"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>',
+    work: PIC_SVG + ' class="busy"><path d="M12 8V4H8"/><rect width="16" height="12" x="4" y="8" rx="2"/><path d="M2 14h2"/><path d="M20 14h2"/><path d="M15 13v2"/><path d="M9 13v2"/></svg>',
     hand: PIC_SVG + '><path d="M18 11V6a2 2 0 0 0-2-2a2 2 0 0 0-2 2"/><path d="M14 10V4a2 2 0 0 0-2-2a2 2 0 0 0-2 2v2"/><path d="M10 10.5V6a2 2 0 0 0-2-2a2 2 0 0 0-2 2v8"/><path d="M18 8a2 2 0 1 1 4 0v6a8 8 0 0 1-8 8h-2c-2.8 0-4.5-.86-5.99-2.34l-3.6-3.6a2 2 0 0 1 2.83-2.82L7 15"/></svg>'
   }
   function updateHeader() {

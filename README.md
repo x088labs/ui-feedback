@@ -49,7 +49,7 @@ If no agent is listening, the plug button in the chat header copies a prompt; pa
 - **Several elements:** Ctrl+click (Cmd on macOS), or the **+** button on touch screens, adds elements labelled A, B, C… Mention them in your note as `[A]`, `[B]` (Alt+A, Alt+B… inserts them).
 - **Images:** paste (Ctrl+V), drop, or use the image button. Up to 4 per message.
 - **Measure:** the ruler button shows a DevTools-style box model (size, padding, margin) for the hovered and picked elements.
-- **Status:** the header icon shows the agent's state: a green ear while it listens, a spinner while it works, a hand while it waits for your approval.
+- **Status:** the header icon shows the agent's state: a green ear while it listens, a pulsing robot while it works, a hand while it waits for your approval.
 - **Shortcuts:** Esc or Alt+Shift+K stops picking, Alt+Shift+H hides the overlay.
 
 Several sites at once: run one `serve` per site; each agent only gets the feedback for its own site.
