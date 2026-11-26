@@ -63,7 +63,7 @@
     '.fab:hover,.fab.on{opacity:1}.fab.on{background:#f9f6e7;color:#1d2433;border-color:#f9f6e7}' +
     '.badge{display:none;min-width:18px;height:18px;padding:0 5px;border-radius:9px;background:#b3261e;color:#fff;font-size:11px;line-height:18px;text-align:center}' +
     '.dot{width:8px;height:8px;border-radius:50%;background:#9aa3b5}.dot.live{background:#22a06b}.dot.work{background:#e0a100;animation:pulse 1.2s ease-in-out infinite}' +
-    '@keyframes pulse{0%,100%{opacity:.35}50%{opacity:1}}@keyframes bounce{0%,80%,100%{opacity:.3;transform:translateY(0)}40%{opacity:1;transform:translateY(-3px)}}' +
+    '@keyframes spin{to{transform:rotate(360deg)}}@keyframes pulse{0%,100%{opacity:.35}50%{opacity:1}}@keyframes bounce{0%,80%,100%{opacity:.3;transform:translateY(0)}40%{opacity:1;transform:translateY(-3px)}}' +
     '.typing{align-self:flex-start;display:flex;align-items:center;gap:8px;background:#eef1f7;border-radius:10px;border-bottom-left-radius:3px;padding:8px 12px;color:#5d6678;white-space:nowrap;max-width:100%}' +
     '.typing .d{width:6px;height:6px;border-radius:50%;background:#8a93a6;animation:bounce 1.2s infinite}.typing .d:nth-child(2){animation-delay:.15s}.typing .d:nth-child(3){animation-delay:.3s}' +
     '@media (prefers-reduced-motion:reduce){.dot.work,.typing .d{animation:none;opacity:1}}' +
@@ -76,7 +76,7 @@
     '.rzw{display:none;position:absolute;left:0;top:0;bottom:0;width:6px;cursor:ew-resize;z-index:2;touch-action:none}.chat.pin .rzw{display:block}.rzw:hover,.rzw.on{background:#f9f6e799}' +
     '.hd{display:flex;align-items:center;gap:8px;padding:9px 10px;border-bottom:1px solid #e3e6ee;background:#f6f7fa;white-space:nowrap}' +
     '.hd .lr{flex:none;display:flex;align-items:center;border:1px solid #c9ced8;background:#fff;color:#1d2433;border-radius:6px;padding:4px 6px;cursor:pointer;line-height:0}.hd .lr[hidden]{display:none}.hd .lr input{position:absolute;opacity:0;width:0;height:0;margin:0}.hd .lr svg{display:block;pointer-events:none}.hd .lr.on{background:#f9f6e7;border-color:#ecd58a}' +
-    '.hd .t{font-weight:600;flex:none}.hd .pres{font-size:11px;color:#5d6678;margin-right:auto;display:flex;align-items:center;gap:5px;min-width:0}.hd .ptxt{overflow:hidden;text-overflow:ellipsis;min-width:0}.hd .ptxt[hidden]{display:none}.hd button{flex:none}' +
+    '.hd .t{font-weight:600;flex:none}.hd .pres{font-size:11px;color:#5d6678;margin-right:auto;display:flex;align-items:center;gap:5px;min-width:0}.hd .ptxt{overflow:hidden;text-overflow:ellipsis;min-width:0}.hd .ptxt[hidden]{display:none}.hd .pic{display:flex;line-height:0}.hd .pic[hidden],.hd .dot[hidden]{display:none}.hd .pic.live{color:#22a06b}.hd .pic.work{color:#e0a100}.hd .pic .spin{animation:spin 1s linear infinite}.hd button{flex:none}' +
     '.stale{position:relative;margin:4px 0 8px;padding:8px 26px 8px 10px;border:1px solid #ecd58a;background:#fdf9ea;border-radius:8px;font-size:12px;color:#5d4a00;display:flex;flex-direction:column;gap:6px;align-items:flex-start}' +
     '.stale button.x{position:absolute;top:4px;right:4px;border:0;background:none;color:#8a7420;font-size:15px;line-height:1;padding:2px 5px;border-radius:4px;cursor:pointer}.stale button.x:hover{background:#f3e8bd;color:#5d4a00}' +
     '.hd button.cp{font-size:11px;padding:1px 7px;border-color:#22a06b;color:#1a7f52}.hd button.cp:hover{background:#e7f6ef}.hd button.cp[hidden]{display:none}' +
@@ -129,7 +129,7 @@
     '.row{display:flex;gap:6px;justify-content:flex-end;margin-top:6px;align-items:center}.row .msg{flex:1;font-size:11px;line-height:1.3;color:#b3261e;min-width:0;overflow:hidden;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow-wrap:anywhere}.row button{flex:none;white-space:nowrap}' +
     '</style>' +
     '<div class="mks"></div><div class="hbm"></div><div class="box"></div><div class="tag"></div>' +
-    '<div class="chat"><div class="rz" title="' + L('Kéo để đổi kích thước', 'Drag to resize') + '"></div><div class="rzw" title="' + L('Kéo để đổi chiều rộng', 'Drag to change the width') + '"></div><div class="hd"><span class="t">UI Feedback</span><span class="pres"><span class="dot"></span><span class="ptxt">' + L('Chưa kết nối', 'Not connected') + '</span><button class="b cp ib" data-a="connect" hidden title="' + L('Chưa có agent. Bấm để chép một câu lệnh, dán vào agent bất kỳ (Claude Code, Codex…) để agent kết nối và nhận phản hồi từ trang này', 'No agent yet. Click to copy a prompt; paste it into any agent (Claude Code, Codex…) to connect it to this page') + '" aria-label="' + L('Kết nối agent', 'Connect agent') + '"><svg class="ic" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 22v-5"/><path d="M9 8V2"/><path d="M15 8V2"/><path d="M18 8v5a4 4 0 0 1-4 4h-4a4 4 0 0 1-4-4V8Z"/></svg><svg class="ok" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg><span class="bt">' + L('Kết nối agent', 'Connect agent') + '</span></button></span>' +
+    '<div class="chat"><div class="rz" title="' + L('Kéo để đổi kích thước', 'Drag to resize') + '"></div><div class="rzw" title="' + L('Kéo để đổi chiều rộng', 'Drag to change the width') + '"></div><div class="hd"><span class="t">UI Feedback</span><span class="pres"><span class="dot"></span><span class="pic" role="img" hidden></span><span class="ptxt">' + L('Chưa kết nối', 'Not connected') + '</span><button class="b cp ib" data-a="connect" hidden title="' + L('Chưa có agent. Bấm để chép một câu lệnh, dán vào agent bất kỳ (Claude Code, Codex…) để agent kết nối và nhận phản hồi từ trang này', 'No agent yet. Click to copy a prompt; paste it into any agent (Claude Code, Codex…) to connect it to this page') + '" aria-label="' + L('Kết nối agent', 'Connect agent') + '"><svg class="ic" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 22v-5"/><path d="M9 8V2"/><path d="M15 8V2"/><path d="M18 8v5a4 4 0 0 1-4 4h-4a4 4 0 0 1-4-4V8Z"/></svg><svg class="ok" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg><span class="bt">' + L('Kết nối agent', 'Connect agent') + '</span></button></span>' +
     '<label class="lr" hidden title="' + L('Tự tải lại trang khi file của site thay đổi', 'Reload the page when site files change') + '" aria-label="' + L('Tự tải lại', 'Auto-reload') + '"><input type="checkbox" data-live><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a9 9 0 1 1-3-6.7L21 8"/><path d="M21 3v5h-5"/></svg></label><button class="b" data-a="measure" title="' + L('Hiện kích thước, padding, margin của phần tử đang trỏ và đã chọn', 'Show size, padding and margin of the hovered and picked elements') + '" aria-label="' + L('Đo phần tử', 'Measure elements') + '"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21.3 15.3a2.4 2.4 0 0 1 0 3.4l-2.6 2.6a2.4 2.4 0 0 1-3.4 0L2.7 8.7a2.41 2.41 0 0 1 0-3.4l2.6-2.6a2.41 2.41 0 0 1 3.4 0Z"/><path d="m14.5 12.5 2-2"/><path d="m11.5 9.5 2-2"/><path d="m8.5 6.5 2-2"/><path d="m17.5 15.5 2-2"/></svg></button><button class="b" data-a="pin" title="' + L('Ghim cố định bên phải trang (kéo mép trái để đổi chiều rộng)', 'Pin to the right edge (drag the left edge to resize)') + '" aria-label="' + L('Ghim', 'Pin') + '"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 17v5"/><path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z"/></svg></button><button class="b" data-a="clear" title="' + L('Xóa lịch sử hội thoại', 'Clear conversation history') + '" aria-label="' + L('Xóa lịch sử hội thoại', 'Clear conversation history') + '"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><path d="M10 11v6"/><path d="M14 11v6"/></svg></button><button class="b" data-a="close" title="' + L('Đóng', 'Close') + '">×</button></div>' +
     '<div class="list"></div>' +
     '<div class="cmp"><div class="sel"></div><div class="att"></div><input type="file" accept="image/*" multiple hidden data-file>' +
@@ -144,7 +144,7 @@
     if (sp) { sp.textContent = t; btn.setAttribute('aria-label', t) } else btn.textContent = t
   }
   var box = $('.box'), tag = $('.tag'), chat = $('.chat'), list = $('.list'), ta = $('textarea'), msg = $('.msg')
-  var fab = $('.fab'), fabDot = $('.fab .dot'), badge = $('.badge'), pres = $('.pres .dot'), ptxt = $('.ptxt')
+  var fab = $('.fab'), fabDot = $('.fab .dot'), badge = $('.badge'), pres = $('.pres .dot'), ptxt = $('.ptxt'), pic = $('.pic')
   var attBox = $('.att'), fileIn = $('[data-file]')
   // Thiết bị cảm ứng không có Ctrl+V/Ctrl+Enter: gợi ý ngắn, dán ảnh qua nút ảnh hoặc menu dán của bàn phím.
   try { if (window.matchMedia('(hover:none) and (pointer:coarse)').matches) ta.placeholder = L('Ghi chú: sai ở đâu?', 'Note: what is wrong?') } catch (_) {}
@@ -229,14 +229,28 @@
     var s = staleItem(), k = s ? s.min : -1
     if (k !== staleKey) { staleKey = k; if (open) render() } // chỉ vẽ lại khi vào/ra trạng thái kẹt hoặc số phút đổi
   }, Math.min(30000, Math.max(500, STALE_MS / 2)))
+  // Icon trạng thái agent ở header (lucide): tai = đang nghe, vòng xoay = đang làm, bàn tay = chờ cho phép.
+  var PIC_SVG = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"'
+  var PIC = {
+    live: PIC_SVG + '><path d="M6 8.5a6.5 6.5 0 1 1 13 0c0 6-6 6-6 10a3.5 3.5 0 1 1-7 0"/><path d="M15 8.5a2.5 2.5 0 0 0-5 0v1a2 2 0 1 1 0 4"/></svg>',
+    work: PIC_SVG + ' class="spin"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>',
+    hand: PIC_SVG + '><path d="M18 11V6a2 2 0 0 0-2-2a2 2 0 0 0-2 2"/><path d="M14 10V4a2 2 0 0 0-2-2a2 2 0 0 0-2 2v2"/><path d="M10 10.5V6a2 2 0 0 0-2-2a2 2 0 0 0-2 2v8"/><path d="M18 8a2 2 0 1 1 4 0v6a8 8 0 0 1-8 8h-2c-2.8 0-4.5-.86-5.99-2.34l-3.6-3.6a2 2 0 0 1 2.83-2.82L7 15"/></svg>'
+  }
   function updateHeader() {
     var w = isWorking() || perms.length > 0
     var cls = 'dot' + (w ? ' work' : listening ? ' live' : '')
     fabDot.className = cls
     pres.className = cls
-    ptxt.textContent = perms.length ? L('Chờ bạn cho phép', 'Waiting for your approval') : w ? L('Agent đang làm việc…', 'Agent is working…') : listening ? L('Agent đang nghe', 'Agent is listening') : L('Chưa có agent', 'No agent yet')
+    var txt = perms.length ? L('Chờ bạn cho phép', 'Waiting for your approval') : w ? L('Agent đang làm việc…', 'Agent is working…') : listening ? L('Agent đang nghe', 'Agent is listening') : L('Chưa có agent', 'No agent yet')
+    ptxt.textContent = txt
     cpBtn.hidden = w || listening
-    ptxt.hidden = !cpBtn.hidden // header hẹp: chấm xám + nút "Kết nối agent" đã nói "chưa có agent", bỏ chữ để không bị cắt cụt
+    // Có agent: chỉ hiện icon trạng thái (đồng nhất với các nút icon), chữ nằm ở tooltip/aria-label.
+    // Chưa có agent: chấm xám + nút "Kết nối agent" đã đủ nghĩa. Lúc nào cũng ẩn chữ để header hẹp không bị cắt cụt.
+    var ic = perms.length ? 'hand' : w ? 'work' : listening ? 'live' : ''
+    if (pic.getAttribute('data-s') !== ic) { pic.setAttribute('data-s', ic); pic.innerHTML = ic ? PIC[ic] : '' }
+    pic.className = 'pic' + (ic === 'live' ? ' live' : ic ? ' work' : '')
+    pic.hidden = !ic; pres.hidden = !!ic; ptxt.hidden = true
+    pic.setAttribute('aria-label', txt); pic.parentNode.title = ic ? txt : ''
   }
   // Câu lệnh cho agent (tiếng Anh): nối vào trang ĐANG mở này, không chạy serve mới, không dừng serve của người khác.
   function connectPrompt() {
